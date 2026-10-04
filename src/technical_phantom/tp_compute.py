@@ -843,6 +843,51 @@ class QAPipeline:
 
         return results
 
+def _full_selection(is_wire):
+    """Alle Analysen an (ohne Nachfragen)."""
+    if is_wire:
+        return {"nps": True, "cnr": False, "mtf": True, "mtf_method": "psb",
+                "dprime": False, "dprime_lowcontrast": False}
+    return {"nps": True, "cnr": True, "mtf": True, "mtf_method": "psb", "uniformity": True,
+            "dprime": True, "dprime_lowcontrast": False}
+
+
+def run_everything(pipeline):
+    """Modus 6: Modus 1-5 ohne Nachfragen durchlaufen (Referenz muss existieren), alles plotten."""
+    import matplotlib.pyplot as plt
+    if not pipeline.ref_mgr.exists():
+        print("Keine Referenz vorhanden -> bitte zuerst Modus 0 ausführen.")
+        return
+    _orig_show = plt.show
+    plt.show = lambda *a, **k: None          # Kontrollfenster der Pipeline unterdrücken
+    try:
+        label = _safe_tag(EID_dataset)
+        sel = _full_selection(False)
+        print("\n══ 1/5 Einzelanalyse ══")
+        pipeline.run(EID_dataset, dataset_label=label, show_plots=True, review=False, is_wire_phantom=False,
+                    **_sel_kwargs(sel))
+        save_and_plot(pipeline, "single", label)
+
+        print("\n══ 2/5 Vergleich EICT/PCCT ══")
+        pipeline.run_compare(EID_dataset, PCCT_dataset, "EICT", "PCCT", sel, review=False)
+        save_and_plot(pipeline, "compare", "EICT_vs_PCCT")
+
+        for is_wire, datasets, tag in ((True, kernel_datasets, "wire"), (False, catphan_kernel_datasets, "catphan")):
+            print(f"\n══ 3/5 Batch ({tag}) ══")
+            pipeline.run_batch(datasets, _full_selection(is_wire), review=False, is_wire_phantom=is_wire)
+            save_and_plot(pipeline, "batch", tag)
+
+        print("\n══ 4/5 Dosis-Serie ══")
+        pipeline.run_dose_series(batch_datasets, sel, review=False, dprime_diameter_mm=INSERT_DIAMETER_MM)
+        save_and_plot(pipeline, "dose", "series")
+
+        print("\n══ 5/5 Linienpaare ══")
+        pipeline.run_linepair_visual_comparison(linepair_datasets, review=False)
+        save_and_plot(pipeline, "linepairs", "kernels")
+    finally:
+        plt.show = _orig_show
+        plt.close("all")
+
 
 # ══════════════════════════════════════════════════════════════════
 # MAIN
@@ -856,8 +901,9 @@ def main():
     print("  3 = Batch          (mehrere Datensätze, MTF/NPS-Kernel-Vergleich)")
     print("  4 = Dosis-Serie    (PCCT/EICT, CNR/NPS/d' gruppiert nach Dosis)")
     print("  5 = Linienpaare-Viewer (subjektiver Kernel-Vergleich: Zoom + Profile, keine MTF)")
-    modus = input("Modus [0/1/2/3/4/5] (Standard: 1): ").strip()
-    if modus not in ("0", "1", "2", "3", "4", "5"):
+    print("  6 = Alles (Modus 1-5 ohne Nachfragen, danach alles plotten; Referenz muss existieren)")
+    modus = input("Modus [0-6] (Standard: 1): ").strip()
+    if modus not in ("0", "1", "2", "3", "4", "5", "6"):
         modus = "1"
 
     if modus == "0":
@@ -918,6 +964,9 @@ def main():
                              default=False)
         pipeline.run_linepair_visual_comparison(linepair_datasets, review=review)
         save_and_plot(pipeline, "linepairs", "kernels")
+
+    elif modus == "6":
+        run_everything(pipeline)
 
 
 if __name__ == "__main__":

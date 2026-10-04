@@ -1,21 +1,25 @@
 """
 Technisches Phantom – PLOTS
 ===========================
-Liest die von tp_compute.py gespeicherten Ergebnisse (.pkl) und zeichnet jeden Plot als
-EINZELNE Figur (keine Subplots). Jede Figur wird als SVG in PLOTS_DIR/<Ergebnisname>/ gespeichert.
+Liest die von tp_compute.py gespeicherten Ergebnisse (.pkl) und speichert ALLE Plots als SVG
+(es wird nichts angezeigt). Pro Modus entstehen Einzelplots UND Multi-Figures (a, b, c ...).
 
-Nur neu plotten (ohne Neuberechnung):
-    python tp_plots.py                 -> neueste .pkl in RESULTS_DIR
-    python tp_plots.py <pfad.pkl>      -> bestimmte Datei
+Start:
+    python tp_plots.py            -> Menü (Modus wählen oder 6 = alles)
+    python tp_plots.py 4          -> direkt Modus 4 (Dosis-Serie)
+    python tp_plots.py pfad.pkl   -> bestimmte .pkl
+Ausgabe: PLOTS_DIR/<modus>/  (wird bei jedem Lauf überschrieben)
 """
 import os
 import re
 import sys
 import glob
 import pickle
+import traceback
 
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
 import matplotlib.patches as patches
 import matplotlib.patheffects as pe
 from matplotlib.lines import Line2D
@@ -29,7 +33,7 @@ from tp_helpers import _mtf_level, _kernel_group
 # ── Globale Einstellungen ──────────────────────────────────────────
 # Alle Plots: gleiche Figurgröße, gleiche Ränder (Achsen liegen überall an derselben Stelle),
 # eine Schrift, eine Schriftgröße. Bei 100 % in Inkscape ist das die Druckgröße.
-FIG_SIZE = (6.5, 4.9)      # Breite, Höhe in Zoll (12,7 x 9,5 cm) – für ALLE Plots
+FIG_SIZE = (5.0, 3.75)      # Breite, Höhe in Zoll (12,7 x 9,5 cm) – für ALLE Plots
 FONT_SIZE = 12              # pt – für ALLE Texte (Achsen, Ticks, Legende, Titel, Annotationen)
 MARGINS = dict(left=0.19, right=0.97, bottom=0.21, top=0.90)   # fester Achsenrahmen (Anteil der Figur)
 
@@ -51,7 +55,16 @@ plt.rcParams.update({
     "figure.max_open_warning": 0,
     "toolbar": "None",               # keine Toolbar -> Fenster erzwingt keine andere Figurbreite
 })
-SHOW = True                 # Plots zusätzlich anzeigen
+# Multi-Figures (Breite = FIG_SIZE[0]; Höhe = Anzahl Panels x MULTI_PANEL_H)
+MULTI_PANEL_H = 3.4                 # Zoll pro Panel (inkl. x-Beschriftung und Platz für den Buchstaben)
+MULTI_MARGINS_IN = dict(left=0.95, right=0.15, bottom=0.66, top=0.34)   # Zoll – identisch in allen Multi-Figures
+PANEL_LABEL_FMT = "{}"              # "{}" -> a, b, c   |   "({})" -> (a), (b), (c)
+PANEL_LABEL_SIZE = 18               # pt – Größe der Panel-Buchstaben (a, b, c)
+RATIO_CAP_WIDTH = 0.25             # Breite der Querstriche an den schwarzen Ratio-Pfeilen (vorher 0.6)
+CURVE_CUTOFF_PAD = 1.15             # x-Achse endet bei (Punkt, an dem alle Kurven bei Null sind) x 1.15 -> kurzer Auslauf
+CURVE_CUTOFF_FRAC = 0.01            # MTF-/NPS-Kurven: x-Achse endet, wenn alle Kurven unter 1 % ihres Maximums liegen
+PANEL_LABEL_X_IN = 0.03             # Abstand der Buchstaben vom linken Rand (Zoll) – bei allen Panels gleich
+DPRIME_FIGURE_MATERIALS = ["Teflon", "LDPE", "Acrylic"]   # Reihenfolge der d'-Multi-Figure (Modus 4)
 SHOW_TITLES = False         # False = keine Titel in der Grafik (Journal: Titel gehören in die Caption)
 FAMILY = {"EID": {"label": "EICT", "linestyle": (0, (5, 5)), "color": "tab:blue"},
           "PCCT": {"label": "PCCT", "linestyle": "-", "color": "tab:orange"}}
@@ -68,22 +81,44 @@ def _fname(*parts):
     return re.sub(r"[^\w\-.]+", "_", raw).strip("_")
 
 
-def _save(fig, *name_parts):
+def _save(fig, *name_parts, size=None, strip_titles=True):
     os.makedirs(_OUT_DIR, exist_ok=True)
     path = os.path.join(_OUT_DIR, _fname(*name_parts) + ".svg")
-    if not SHOW_TITLES:
+    if strip_titles and not SHOW_TITLES:
         for a in fig.axes:
             a.set_title("")
-    fig.set_size_inches(*FIG_SIZE)
+    fig.set_size_inches(*(size or FIG_SIZE))
     fig.savefig(path, format="svg")          # bewusst OHNE bbox_inches="tight" -> alle SVGs exakt gleich groß
     print(f"  SVG: {path}")
 
 
 def _new_fig():
-    """Neue Figur mit einheitlicher Größe und festem Achsenrahmen."""
-    fig, ax = plt.subplots(figsize=FIG_SIZE)
+    """Neue Figur (ohne pyplot -> es öffnet sich nie ein Fenster) mit festem Achsenrahmen."""
+    fig = Figure(figsize=FIG_SIZE)
+    ax = fig.add_subplot(111)
     fig.subplots_adjust(**{**MARGINS, **({} if SHOW_TITLES else {"top": 0.97})})
     return fig, ax
+
+
+def _cut_x_at_zero(ax, curves, frac=None, pad=None, keep_x=()):
+    """x-Achse bis dorthin, wo ALLE Kurven die Nulllinie erreicht haben (|y| < frac * Maximum).
+    curves: [(x, y), ...] – keep_x: x-Werte, die sichtbar bleiben müssen (z. B. MTF50/MTF10)."""
+    frac = CURVE_CUTOFF_FRAC if frac is None else frac
+    pad = CURVE_CUTOFF_PAD if pad is None else pad
+    data = [(np.asarray(x, float), np.asarray(y, float)) for x, y in curves if len(y)]
+    if not data:
+        return
+    ymax = max(np.nanmax(np.abs(y)) for _, y in data)
+    if not np.isfinite(ymax) or ymax <= 0:
+        return
+    xend = 0.0
+    for x, y in data:
+        idx = np.where(np.abs(y) > frac * ymax)[0]
+        if idx.size:
+            xend = max(xend, float(x[idx[-1]]))
+    xend = max([xend] + [float(k) for k in keep_x if np.isfinite(k)])
+    if xend > 0:
+        ax.set_xlim(0, xend * pad)
 
 
 def _style_legend(ax, headroom=1.15, **kwargs):
@@ -103,7 +138,7 @@ def _style_legend(ax, headroom=1.15, **kwargs):
 def _add_ratio_bracket(ax, x_dim, lo, hi, ratio, x_text):
     """Schwarzer I-Balken zwischen lo und hi bei x_dim; rote Ratio-Zahl mittig ÜBER dem höheren Balken."""
     ax.annotate("", xy=(x_dim, hi), xytext=(x_dim, lo),
-                arrowprops=dict(arrowstyle="|-|,widthA=0.6,widthB=0.6",
+                arrowprops=dict(arrowstyle=f"|-|,widthA={RATIO_CAP_WIDTH},widthB={RATIO_CAP_WIDTH}",
                                 color="black", lw=1.2, shrinkA=0, shrinkB=0), zorder=3)
     if np.isfinite(ratio):
         ax.annotate(f"×{ratio:.2f}", xy=(x_text, hi), xytext=(0, 3), textcoords="offset points",
@@ -219,6 +254,7 @@ def plot_nps(label, nps_2d, freqs, nps_1d, upsilon):
 
     fig, ax = _new_fig()
     ax.plot(fr, nps_1d, color="navy", lw=2)
+    _cut_x_at_zero(ax, [(fr, nps_1d)])
     ax.set_title(f"1D NPS | ΥNPS={upsilon:.2f}")
     ax.set_xlabel("Freq (1/mm)"); ax.grid(alpha=0.3)
     _save(fig, label, "NPS_1D")
@@ -233,6 +269,7 @@ def _plot_mtf_curve(fr, mtf, m50, m10, unit, title, label, name):
     if np.isfinite(m10):
         ax.axvline(m10, color="tab:green", ls="--", lw=1.5, label=f"MTF10 = {m10:.3f} {unit}")
     ax.set_ylim(0, 1.05)
+    _cut_x_at_zero(ax, [(fr, mtf)], keep_x=(m50, m10))
     ax.set_xlabel(f"Spatial Frequency [{unit}]"); ax.set_ylabel("MTF"); ax.set_title(title)
     _style_legend(ax, headroom=1.3)
     ax.grid(alpha=0.3)
@@ -368,28 +405,38 @@ def plot_ttf_dprime(label, ctp404, rois_by_material, ttf_results, dprime_by_mate
 # ══════════════════════════════════════════════════════════════════
 # VERGLEICH (2 Datensätze)
 # ══════════════════════════════════════════════════════════════════
-def plot_nps_comparison(tag, curves):
-    fig, ax = _new_fig()
+def _draw_nps_comparison(ax, curves):
+    drawn = []
     for c in curves:
         fr_p, nps_p = _smooth_nps(c["nps_freqs"], c["nps_1d"])
+        drawn.append((fr_p, nps_p))
         ax.plot(fr_p, nps_p, lw=1.5, marker="o", markersize=3, markevery=max(1, len(fr_p) // 14),
                 alpha=0.9, label=f"{c['label']} | ΥNPS={c['upsilon_nps']:.2f}")
     ax.set_xlabel("Freq (1/mm)"); ax.set_ylabel("1D NPS (HU²·mm²)")
     ax.set_xlim(left=0); ax.set_ylim(bottom=0)
+    _cut_x_at_zero(ax, drawn)
     _style_legend(ax, headroom=1.25)
     ax.grid(alpha=0.3)
+
+
+def plot_nps_comparison(tag, curves):
+    fig, ax = _new_fig()
+    _draw_nps_comparison(ax, curves)
     _save(fig, tag, "NPS_comparison")
 
 
 def plot_mtf_comparison(tag, curves):
     fig, ax = _new_fig()
+    drawn = []
     for c in curves:
         m50 = f"{float(c['mtf50']):.3f}" if c.get("mtf50") and np.isfinite(c["mtf50"]) else "n/a"
         m10 = f"{float(c['mtf10']):.3f}" if c.get("mtf10") and np.isfinite(c["mtf10"]) else "n/a"
         fr_p, mtf_p = _smooth_mtf(c["fr_lp_mm"], c["mtf"], f"{c.get('label', '')} {c.get('kernel', '')}")
+        drawn.append((fr_p, mtf_p))
         ax.plot(fr_p, mtf_p, lw=1.5, marker="o", markersize=3, markevery=max(1, len(fr_p) // 14),
                 alpha=0.9, label=f"{c['label']} | MTF50={m50} | MTF10={m10}")
     _mtf_axes(ax)
+    _cut_x_at_zero(ax, drawn)
     ax.set_title("MTF Comparison")
     _style_legend(ax, headroom=1.3)
     ax.grid(alpha=0.3)
@@ -461,18 +508,22 @@ def plot_uniformity_comparison(tag, u1, u2, label_1, label_2, tol=UNIFORMITY_TOL
     _save(fig, tag, "Uniformity_comparison")
 
 
-def _cnr_material_bars(cnr_1, cnr_2, label_1, label_2, *name_parts):
-    """Ein Plot, alle Materialien: Balkenpaar je Material + Ratio-Pfeil (cnr_2 / cnr_1)."""
+def _draw_cnr_bars(ax, cnr_1, cnr_2, label_1, label_2):
+    """Alle Materialien in einem Plot: Balkenpaar je Material + Ratio-Pfeil (cnr_2 / cnr_1)."""
     x = np.arange(len(INSERT_NAMES), dtype=float); w = 0.3
     v1 = [float(cnr_1.get(n, np.nan)) for n in INSERT_NAMES]
     v2 = [float(cnr_2.get(n, np.nan)) for n in INSERT_NAMES]
-    fig, ax = _new_fig()
     _paired_bars(ax, x, v1, v2, w, (label_1, label_2), ("tab:blue", "tab:orange"),
-                       bracket_left_of_pair=True, ratio_ab=False)
+                 bracket_left_of_pair=True, ratio_ab=False)
     ax.set_xticks(x); ax.set_xticklabels(INSERT_NAMES, rotation=25, ha="right")
     ax.set_ylabel("CNR")
     _style_legend(ax, headroom=1.55)
     ax.grid(axis="y", alpha=0.3)
+
+
+def _cnr_material_bars(cnr_1, cnr_2, label_1, label_2, *name_parts):
+    fig, ax = _new_fig()
+    _draw_cnr_bars(ax, cnr_1, cnr_2, label_1, label_2)
     _save(fig, *name_parts)
 
 
@@ -483,9 +534,9 @@ def plot_cnr_comparison(tag, cnr_1, cnr_2, label_1, label_2):
 # ══════════════════════════════════════════════════════════════════
 # BATCH (Kernel-Vergleich)
 # ══════════════════════════════════════════════════════════════════
-def _kernel_curves(results, x_key, y_key, smooth, ylabel, xlabel, title, name, ylim):
-    fig, ax = _new_fig()
+def _draw_kernel_curves(ax, results, x_key, y_key, smooth, ylabel, xlabel, ylim):
     colors = _kernel_color_map(results)
+    drawn = []
     for r in results:
         if not len(r[x_key]):
             continue
@@ -493,28 +544,38 @@ def _kernel_curves(results, x_key, y_key, smooth, ylabel, xlabel, title, name, y
         ls = fam["linestyle"]
         label = f"{fam['label']} | {kg}" + (" | iMAR" if "imar" in str(r.get("label", "")).lower() else "")
         fr_p, y_p = smooth(r)
+        drawn.append((fr_p, y_p))
         a = 0.65 if (ls == "-" and y_key == "mtf_curve") else 0.95
         ax.plot(fr_p, y_p, color=colors[kg], linestyle=ls, linewidth=1.5, alpha=a, zorder=3, label=label)
         ax.scatter([fr_p[0], fr_p[-1]], [y_p[0], y_p[-1]], color=colors[kg], s=18, zorder=4, alpha=a)
     ax.grid(True, which="major", color="#D9D9D9", linewidth=0.8, alpha=0.8)
     ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
-    ax.set_title(title); ax.set_xlabel(xlabel); ax.set_ylabel(ylabel)
+    ax.set_xlabel(xlabel); ax.set_ylabel(ylabel)
     ax.set_xlim(left=0); ax.set_ylim(*ylim)
-    _style_legend(ax, headroom=1.15, title="Kernel family", handlelength=3.0, ncol=2)
-    _save(fig, "kernels", name)
+    _cut_x_at_zero(ax, drawn)
+    _style_legend(ax, headroom=1.15, title="Kernel family", handlelength=2.0, ncol=1)
+
+
+def _draw_kernel_mtf(ax, results):
+    _draw_kernel_curves(ax, results, "mtf_fr_lp_mm", "mtf_curve",
+                        lambda r: _smooth_mtf(r["mtf_fr_lp_mm"], r["mtf_curve"], r.get("label", "")),
+                        "MTF", "Spatial Frequency [lp/mm]", (0, 1.05))
+
+
+def _draw_kernel_nps(ax, results):
+    _draw_kernel_curves(ax, results, "nps_freqs", "nps_1d", lambda r: _smooth_nps(r["nps_freqs"], r["nps_1d"]),
+                        "HU²·mm²", "Spatial Frequency [1/mm]", (0, None))
 
 
 def plot_kernel_mtf_nps(results):
-    _kernel_curves(results, "mtf_fr_lp_mm", "mtf_curve",
-                   lambda r: _smooth_mtf(r["mtf_fr_lp_mm"], r["mtf_curve"], r.get("label", "")),
-                   "MTF", "Spatial Frequency [lp/mm]", "MTF", "MTF", (0, 1.05))
-    _kernel_curves(results, "nps_freqs", "nps_1d", lambda r: _smooth_nps(r["nps_freqs"], r["nps_1d"]),
-                   "HU²·mm²", "Spatial Frequency [1/mm]", "1D Noise Power Spectrum", "NPS_1D", (0, None))
+    for draw, name in ((_draw_kernel_mtf, "MTF"), (_draw_kernel_nps, "NPS_1D")):
+        fig, ax = _new_fig()
+        draw(ax, results)
+        _save(fig, "kernels", name)
 
 
-def plot_kernel_upsilon(kernels, series):
+def _draw_kernel_upsilon(ax, kernels, series):
     x = np.arange(len(kernels), dtype=float)
-    fig, ax = _new_fig()
     for stype, ys in series.items():
         ok = [(xi, y) for xi, y in zip(x, ys) if np.isfinite(y)]
         if ok:
@@ -524,29 +585,40 @@ def plot_kernel_upsilon(kernels, series):
     ax.set_xlabel("Kernel"); ax.set_ylabel("ΥNPS"); ax.set_title("ΥNPS per kernel")
     _style_legend(ax, headroom=1.35)
     ax.grid(alpha=0.3)
+
+
+def plot_kernel_upsilon(kernels, series):
+    fig, ax = _new_fig()
+    _draw_kernel_upsilon(ax, kernels, series)
     _save(fig, "kernels", "Upsilon_NPS")
 
 
 # ══════════════════════════════════════════════════════════════════
 # LINIENPAARE
 # ══════════════════════════════════════════════════════════════════
+def _draw_linepair_zoom(ax, e, colors, draw_line=True, lw_frame=3.5):
+    """Rahmenfarbe = Kernel, Rahmenstil = Scanner (PCCT durchgezogen, EID gestrichelt)."""
+    vmin, vmax = _window_limits(e["crop"])
+    ax.imshow(e["crop"], cmap="gray", vmin=vmin, vmax=vmax)
+    if draw_line:
+        x0, y0, _, _ = e["crop_bounds"]
+        (lsx, lsy), (lex, ley) = e["line_start"], e["line_end"]
+        ax.plot([lsx - x0, lex - x0], [lsy - y0, ley - y0], "r-", lw=1.5)
+    color = colors[_kernel_group(e["kernel"])]
+    ls = "--" if str(e.get("scanner_type", "")).upper() == "EID" else "-"
+    for sp in ax.spines.values():
+        sp.set_visible(True); sp.set_edgecolor(color); sp.set_linewidth(lw_frame); sp.set_linestyle(ls)
+    ax.set_xticks([]); ax.set_yticks([])
+    return color
+
+
 def plot_linepair_zoom(entries, draw_line=True):
-    """Ein Bild pro Datensatz. Rahmenfarbe = Kernel, Rahmenstil = Scanner (PCCT —, EID --)."""
+    """Ein Bild pro Datensatz."""
     colors = _kernel_color_map(entries)
     for e in entries:
         fig, ax = _new_fig()
-        vmin, vmax = _window_limits(e["crop"])
-        ax.imshow(e["crop"], cmap="gray", vmin=vmin, vmax=vmax)
-        if draw_line:
-            x0, y0, _, _ = e["crop_bounds"]
-            (lsx, lsy), (lex, ley) = e["line_start"], e["line_end"]
-            ax.plot([lsx - x0, lex - x0], [lsy - y0, ley - y0], "r-", lw=1.5)
-        color = colors[_kernel_group(e["kernel"])]
-        ls = "--" if str(e.get("scanner_type", "")).upper() == "EID" else "-"
+        color = _draw_linepair_zoom(ax, e, colors, draw_line)
         ax.set_title(e["label"], color=color)
-        for sp in ax.spines.values():
-            sp.set_visible(True); sp.set_edgecolor(color); sp.set_linewidth(3.5); sp.set_linestyle(ls)
-        ax.set_xticks([]); ax.set_yticks([])
         _save(fig, "linepairs", "zoom_with_line" if draw_line else "zoom", e["label"])
 
 
@@ -574,11 +646,10 @@ def plot_linepair_profiles(entries):
 # ══════════════════════════════════════════════════════════════════
 # DOSIS-SERIE
 # ══════════════════════════════════════════════════════════════════
-def _dose_bars(g, ylabel, legend_suffix, title, name, ylim_factor=None, headroom=1.6):
+def _draw_dose_bars(ax, g, ylabel, legend_suffix, title="", ylim_factor=None, headroom=1.6):
     x = np.arange(len(g["doses"]), dtype=float); w = 0.3
-    fig, ax = _new_fig()
     _paired_bars(ax, x, g["PCCT"], g["EID"], w, (f"PCCT {legend_suffix}", f"EICT {legend_suffix}"),
-                       ("tab:orange", "tab:blue"))
+                 ("tab:orange", "tab:blue"))
     ax.set_xticks(x); ax.set_xticklabels([f"{c:.2f}" for c in g["doses"]], rotation=25, ha="right")
     ax.set_xlabel("CTDIvol (mGy)"); ax.set_ylabel(ylabel); ax.set_title(title)
     if ylim_factor:
@@ -587,18 +658,29 @@ def _dose_bars(g, ylabel, legend_suffix, title, name, ylim_factor=None, headroom
         yl = ax.get_ylim(); ax.set_ylim(yl[0], yl[0] + (yl[1] - yl[0]) * headroom)
     ax.legend(loc="upper right", bbox_to_anchor=(0.99, 0.99), borderaxespad=0.6, framealpha=0.9)
     ax.grid(axis="y", alpha=0.3)
-    _save(fig, "dose", name)
 
 
-def plot_cnr_dose(g):
-    _dose_bars(g, "Mean CNR across materials", "(mean CNR)", "CNR vs. Dose: PCCT vs. EICT", "CNR_mean")
+def _draw_cnr_dose(ax, g):
+    _draw_dose_bars(ax, g, "Mean CNR across materials", "(mean CNR)", "CNR vs. Dose: PCCT vs. EICT")
 
 
-def plot_dprime_dose(g, material, diameter_mm=None):
+def _draw_dprime_dose(ax, g, material, diameter_mm=None):
     title = f"PCCT vs EICT: d' ({material}) per CTDIvol"
     if diameter_mm is not None:
         title += f" (Ø={diameter_mm:.1f} mm)"
-    _dose_bars(g, "Detectability index d'", "(d')", title, f"dprime_{material}", ylim_factor=1.75)
+    _draw_dose_bars(ax, g, "Detectability index d'", "(d')", title, ylim_factor=1.75)
+
+
+def plot_cnr_dose(g):
+    fig, ax = _new_fig()
+    _draw_cnr_dose(ax, g)
+    _save(fig, "dose", "CNR_mean")
+
+
+def plot_dprime_dose(g, material, diameter_mm=None):
+    fig, ax = _new_fig()
+    _draw_dprime_dose(ax, g, material, diameter_mm)
+    _save(fig, "dose", f"dprime_{material}")
 
 
 def plot_hu_dose(by_material):
@@ -639,9 +721,8 @@ def plot_uniformity_dose(by_position, tol=UNIFORMITY_TOLERANCE_PCT, y_range=None
         _save(fig, "dose", "Uniformity", name)
 
 
-def plot_nps_dose(g):
+def _draw_nps_dose(ax, g):
     x = np.arange(len(g["doses"]), dtype=float)
-    fig, ax = _new_fig()
     for stype in ("PCCT", "EID"):
         ok = [(xi, y) for xi, y in zip(x, g[stype]) if np.isfinite(y)]
         if ok:
@@ -652,11 +733,110 @@ def plot_nps_dose(g):
     ax.set_title("ΥNPS vs. Dose: PCCT vs. EICT")
     _style_legend(ax, headroom=1.2)
     ax.grid(alpha=0.3)
+
+
+def plot_nps_dose(g):
+    fig, ax = _new_fig()
+    _draw_nps_dose(ax, g)
     _save(fig, "dose", "Upsilon_NPS")
 
 
 # ══════════════════════════════════════════════════════════════════
-# DISPATCH
+# MULTI-FIGURES (a, b, c ...) – gleiche Breite, gleiche Ränder, Buchstaben bündig links
+# ══════════════════════════════════════════════════════════════════
+def _panel_letter(fig, i, y_top_in, H):
+    fig.text(PANEL_LABEL_X_IN / fig.get_figwidth(), 1 - y_top_in / H, PANEL_LABEL_FMT.format(chr(97 + i)),
+             ha="left", va="top", fontweight="bold", fontsize=PANEL_LABEL_SIZE)
+
+
+def _stacked_figure(draws, *name_parts):
+    """Panels untereinander (a oben ... ). Alle Achsen haben exakt dieselbe linke/rechte Kante."""
+    n = len(draws); W = FIG_SIZE[0]; PH = MULTI_PANEL_H; H = PH * n
+    m = MULTI_MARGINS_IN; ax_h = PH - m["bottom"] - m["top"]
+    fig = Figure(figsize=(W, H))
+    axes = fig.subplots(n, 1, squeeze=False)[:, 0]
+    fig.subplots_adjust(left=m["left"] / W, right=1 - m["right"] / W, top=1 - m["top"] / H,
+                        bottom=m["bottom"] / H, hspace=(m["bottom"] + m["top"]) / ax_h)
+    for i, (ax, draw) in enumerate(zip(axes, draws)):
+        draw(ax)
+        ax.set_title("")
+        _panel_letter(fig, i, i * PH + 0.03, H)
+    fig.align_ylabels(axes)
+    _save(fig, *name_parts, size=(W, H), strip_titles=False)
+
+
+def _linepair_grid(entries, draw_line, *name_parts):
+    """Zeile a = PCCT, Zeile b = EICT; gleicher Kernel steht jeweils untereinander."""
+    kernels = sorted({_kernel_group(e["kernel"]) for e in entries}, key=lambda k: int(re.search(r"\d+", k).group()))
+    rows = [("PCCT", "PCCT"), ("EID", "EICT")]
+    colors = _kernel_color_map(entries)
+    ncol = len(kernels); W = 2 * FIG_SIZE[0]                 # volle Seitenbreite (= 2 x Einzelplot)
+    L, R, T, B, wsp, hgap = 0.80, 0.10, 0.45, 0.10, 0.05, 0.35
+    cell_w = (W - L - R) / (ncol + (ncol - 1) * wsp)
+    c0 = entries[0]["crop"]; cell_h = cell_w * c0.shape[0] / c0.shape[1]
+    H = T + 2 * cell_h + hgap + B
+    fig = Figure(figsize=(W, H))
+    axes = fig.subplots(2, ncol, squeeze=False)
+    fig.subplots_adjust(left=L / W, right=1 - R / W, top=1 - T / H, bottom=B / H,
+                        wspace=wsp, hspace=hgap / cell_h)
+    for r_i, (stype, slabel) in enumerate(rows):
+        for c_i, kg in enumerate(kernels):
+            ax = axes[r_i, c_i]
+            e = next((x for x in entries if str(x.get("scanner_type", "")).upper() == stype
+                      and _kernel_group(x["kernel"]) == kg), None)
+            if e is None:
+                ax.axis("off"); continue
+            color = _draw_linepair_zoom(ax, e, colors, draw_line, lw_frame=2.0)
+            if r_i == 0:
+                ax.set_title(kg, color=color, pad=4)
+            if c_i == 0:
+                ax.set_ylabel(slabel)
+        row_top_in = T + r_i * (cell_h + hgap)
+        _panel_letter(fig, r_i, row_top_in, H)
+    _save(fig, *name_parts, size=(W, H), strip_titles=False)
+
+
+def _is_wire(bundle):
+    return str(bundle.get("name", "")).startswith("batch_wire")
+
+
+def build_multifigures(bundle):
+    mode = bundle["mode"]
+    items = {}
+    for it in bundle["plots"]:
+        items.setdefault(it["kind"], []).append(it["data"])
+
+    if mode == "compare" and items.get("cnr_comparison") and items.get("nps_comparison"):
+        c, n = items["cnr_comparison"][0], items["nps_comparison"][0]
+        _stacked_figure([lambda ax: _draw_cnr_bars(ax, c["cnr_1"], c["cnr_2"], c["label_1"], c["label_2"]),
+                         lambda ax: _draw_nps_comparison(ax, n["curves"])],
+                        c["tag"], "Figure_CNR_NPS")
+
+    elif mode == "batch" and not _is_wire(bundle) and items.get("kernel_mtf_nps") and items.get("kernel_upsilon"):
+        res, u = items["kernel_mtf_nps"][0]["results"], items["kernel_upsilon"][0]
+        _stacked_figure([lambda ax: _draw_kernel_mtf(ax, res),
+                         lambda ax: _draw_kernel_upsilon(ax, u["kernels"], u["series"])],
+                        "kernels", "Figure_MTF_UpsilonNPS")
+
+    elif mode == "dose":
+        if items.get("cnr_dose") and items.get("nps_dose"):
+            g_c, g_n = items["cnr_dose"][0]["g"], items["nps_dose"][0]["g"]
+            _stacked_figure([lambda ax: _draw_cnr_dose(ax, g_c), lambda ax: _draw_nps_dose(ax, g_n)],
+                            "dose", "Figure_CNR_UpsilonNPS")
+        by_mat = {d["material"]: d for d in items.get("dprime_dose", [])}
+        mats = [m for m in DPRIME_FIGURE_MATERIALS if m in by_mat]
+        if mats:
+            _stacked_figure([(lambda ax, d=by_mat[m]: _draw_dprime_dose(ax, d["g"], d["material"], d.get("diameter_mm")))
+                             for m in mats], "dose", "Figure_dprime")
+
+    elif mode == "linepairs" and items.get("linepair_zoom"):
+        for d in items["linepair_zoom"]:
+            _linepair_grid(d["entries"], d["draw_line"], "linepairs",
+                           "Figure_grid_with_line" if d["draw_line"] else "Figure_grid")
+
+
+# ══════════════════════════════════════════════════════════════════
+# DISPATCH (Einzelplots)
 # ══════════════════════════════════════════════════════════════════
 PLOT_FUNCS = {
     "nps": plot_nps, "mtf_psb": plot_mtf_psb, "mtf_linepairs": plot_mtf_linepairs,
@@ -671,34 +851,75 @@ PLOT_FUNCS = {
 }
 
 
-def render(path, show=SHOW):
+MODES = {"1": "single", "2": "compare", "3": "batch", "4": "dose", "5": "linepairs"}
+MODE_TEXT = {"1": "Einzelanalyse", "2": "Vergleich EICT/PCCT", "3": "Batch (Kernel-Vergleich)",
+             "4": "Dosis-Serie", "5": "Linienpaare"}
+
+
+def render(path):
+    """Plottet eine .pkl: Einzelplots + Multi-Figures -> SVG in PLOTS_DIR/<modus>/ (nichts wird angezeigt)."""
     global _OUT_DIR
     with open(path, "rb") as f:
         bundle = pickle.load(f)
-    _OUT_DIR = os.path.join(PLOTS_DIR, bundle["mode"])   # fester Ordner pro Modus -> wird überschrieben
+    sub = bundle["mode"]                                    # fester Ordner pro Modus -> wird überschrieben
+    m = re.match(r"^batch_(.+)_\d{8}_\d{6}$", str(bundle.get("name", "")))
+    if sub == "batch" and m:
+        sub = f"batch_{m.group(1)}"                          # Batch: wire und catphan getrennt
+    _OUT_DIR = os.path.join(PLOTS_DIR, sub)
     print(f"\nPlotte {len(bundle['plots'])} Einträge aus {os.path.basename(path)} -> {_OUT_DIR}")
     print("  Enthaltene Plots:", ", ".join(i["kind"] for i in bundle["plots"]))
     for item in bundle["plots"]:
         try:
             PLOT_FUNCS[item["kind"]](**item["data"])
         except Exception as ex:
-            import traceback
             print(f"  FEHLER bei Plot '{item['kind']}': {ex}")
             traceback.print_exc()
-    if show:
-        # Fenster exakt in SVG-Größe anzeigen (Backend/Fenster kann die Figur sonst verändern)
-        for num in plt.get_fignums():
-            plt.figure(num).set_size_inches(*FIG_SIZE, forward=True)
-        plt.show()
+    try:
+        build_multifigures(bundle)
+    except Exception as ex:
+        print(f"  FEHLER bei Multi-Figure: {ex}")
+        traceback.print_exc()
     plt.close("all")
 
 
-if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        pkl = sys.argv[1]
-    else:
-        files = sorted(glob.glob(os.path.join(RESULTS_DIR, "*.pkl")), key=os.path.getmtime)
+def _pkls_for_mode(mode):
+    """Neueste .pkl des Modus (Batch: neueste je Variante, z. B. wire und catphan)."""
+    files = sorted(glob.glob(os.path.join(RESULTS_DIR, f"{mode}_*.pkl")), key=os.path.getmtime, reverse=True)
+    if mode != "batch":
+        return files[:1]
+    seen, out = set(), []
+    for f in files:
+        m = re.match(rf"^{mode}_(.+)_\d{{8}}_\d{{6}}\.pkl$", os.path.basename(f))
+        tag = m.group(1) if m else f
+        if tag not in seen:
+            seen.add(tag); out.append(f)
+    return out
+
+
+def plot_mode(choice):
+    modes = list(MODES.values()) if choice == "6" else [MODES[choice]]
+    for mode in modes:
+        files = _pkls_for_mode(mode)
         if not files:
-            sys.exit(f"Keine .pkl in {RESULTS_DIR} gefunden – zuerst tp_compute.py ausführen.")
-        pkl = files[-1]
-    render(pkl)
+            print(f"\nModus '{mode}': keine .pkl in {RESULTS_DIR} -> zuerst tp_compute.py ausführen.")
+        for f in files:
+            render(f)
+
+
+def main(argv):
+    if argv and argv[0].lower().endswith(".pkl"):
+        render(argv[0]); return
+    choice = argv[0] if argv else None
+    if choice not in (*MODES, "6"):
+        print("\nWelche Ergebnisse plotten?")
+        for k, v in MODE_TEXT.items():
+            print(f"  {k} = {v}")
+        print("  6 = Alles (neueste Ergebnisse jedes Modus)")
+        choice = input("Auswahl [1-6] (Standard: 6): ").strip() or "6"
+        if choice not in (*MODES, "6"):
+            choice = "6"
+    plot_mode(choice)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
