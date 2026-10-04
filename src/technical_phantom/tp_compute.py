@@ -558,7 +558,8 @@ class QAPipeline:
                 self.cache.save_fields(sig, {"uniformity_rois": u_rois})
             elif show_plots:
                 ReviewUI.show_registered_rois(images[slices["ctp486_1"]],
-                    {"inserts": {k: v for k, v in u_rois.items() if k != "center"}, "background": u_rois["center"]},
+                    {"inserts": {k: v for k, v in u_rois.items() if k != "center" and isinstance(v, dict)},
+ "background": u_rois["center"]},
                     r_px_u, title=f"{label}: Uniformity ROIs (control)")
 
             _, mean_center, _ = self.analysis.circular_roi(
@@ -616,6 +617,9 @@ class QAPipeline:
             delta = plotdata.mtf_delta(curves[0], curves[1])
             if delta is not None:
                 self._queue("mtf_delta", tag=tag, **delta)
+        if selection["cnr"] and r1.get("cnr_by_material") and r2.get("cnr_by_material"):
+            self._queue("cnr_comparison", tag=tag, cnr_1=r1["cnr_by_material"],
+                        cnr_2=r2["cnr_by_material"], label_1=label_1, label_2=label_2)
         if selection["cnr"] and r1["ct_numbers"] and r2["ct_numbers"]:
             self._queue("hu_accuracy_comparison", tag=tag, ct_numbers_1=r1["ct_numbers"],
                         ct_numbers_2=r2["ct_numbers"], label_1=label_1, label_2=label_2)
