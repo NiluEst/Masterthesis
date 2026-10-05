@@ -750,18 +750,60 @@ def _panel_letter(fig, i, y_top_in, H):
 
 
 def _stacked_figure(draws, *name_parts):
-    """Panels untereinander (a oben ... ). Alle Achsen haben exakt dieselbe linke/rechte Kante."""
-    n = len(draws); W = FIG_SIZE[0]; PH = MULTI_PANEL_H; H = PH * n
-    m = MULTI_MARGINS_IN; ax_h = PH - m["bottom"] - m["top"]
+    """Multi-Panel:
+       1 Panel  = eine Zelle (volle Höhe)
+       2 Panels = nebeneinander  (a links, b rechts)
+       3 Panels = a/b nebeneinander oben, c zentriert darunter
+       >=4      = untereinander (wie bisher)
+       Alle Achsenrahmen sind GENAU gleich groß und die Buchstaben sitzen überall am selben
+       Platz in ihrer Zelle. Positionen werden in Zoll gerechnet und direkt mit add_axes gesetzt."""
+    n = len(draws)
+    W_cell = FIG_SIZE[0]; H_cell = MULTI_PANEL_H
+    m = MULTI_MARGINS_IN
+    ax_w_in = W_cell - m["left"] - m["right"]
+    ax_h_in = H_cell - m["bottom"] - m["top"]
+
+    if n == 1 or n >= 4:
+        W, H = W_cell, H_cell * n
+        fig = Figure(figsize=(W, H))
+        axes = []
+        for i, draw in enumerate(draws):
+            left = m["left"]
+            bot = (n - 1 - i) * H_cell + m["bottom"]
+            ax = fig.add_axes([left / W, bot / H, ax_w_in / W, ax_h_in / H])
+            draw(ax); ax.set_title("")
+            fig.text((left + PANEL_LABEL_X_IN - m["left"]) / W,
+                     1 - (i * H_cell + 0.03) / H,
+                     PANEL_LABEL_FMT.format(chr(97 + i)),
+                     ha="left", va="top", fontweight="bold", fontsize=PANEL_LABEL_SIZE)
+            axes.append(ax)
+        fig.align_ylabels(axes)
+        _save(fig, *name_parts, size=(W, H), strip_titles=False)
+        return
+
+    # 2 oder 3 Panels: 2 Spalten
+    cols = 2
+    rows = 1 if n == 2 else 2
+    W = W_cell * cols
+    H = H_cell * rows
     fig = Figure(figsize=(W, H))
-    axes = fig.subplots(n, 1, squeeze=False)[:, 0]
-    fig.subplots_adjust(left=m["left"] / W, right=1 - m["right"] / W, top=1 - m["top"] / H,
-                        bottom=m["bottom"] / H, hspace=(m["bottom"] + m["top"]) / ax_h)
-    for i, (ax, draw) in enumerate(zip(axes, draws)):
-        draw(ax)
-        ax.set_title("")
-        _panel_letter(fig, i, i * PH + 0.03, H)
-    fig.align_ylabels(axes)
+
+    # Zellen-Ursprünge (links, oben) in Zoll pro Panel
+    cell_origins = [(0, 0), (W_cell, 0)]
+    if n == 3:
+        cell_origins.append(((W - W_cell) / 2, H_cell))   # c zentriert zwischen den beiden oberen
+
+    axes = []
+    for i, (ox, oy) in enumerate(cell_origins):
+        left = ox + m["left"]
+        bot = H - (oy + H_cell) + m["bottom"]              # von oben nach unten gemessen
+        ax = fig.add_axes([left / W, bot / H, ax_w_in / W, ax_h_in / H])
+        draws[i](ax); ax.set_title("")
+        axes.append(ax)
+        fig.text((ox + PANEL_LABEL_X_IN) / W,
+                 1 - (oy + 0.03) / H,
+                 PANEL_LABEL_FMT.format(chr(97 + i)),
+                 ha="left", va="top", fontweight="bold", fontsize=PANEL_LABEL_SIZE)
     _save(fig, *name_parts, size=(W, H), strip_titles=False)
 
 
