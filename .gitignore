@@ -217,6 +217,6 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Technisches Phantom: berechnete Plot-Daten und Plots
+#berechnete Plot-Daten und Plots
 output_data/*
 

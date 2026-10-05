@@ -800,39 +800,60 @@ def _is_wire(bundle):
     return str(bundle.get("name", "")).startswith("batch_wire")
 
 
+def _guard(name, fn):
+    """Jede Multi-Figure läuft für sich: schlägt eine fehl, werden die anderen trotzdem erzeugt."""
+    try:
+        fn()
+    except Exception as ex:
+        print(f"  FEHLER bei Multi-Figure '{name}': {ex}")
+        traceback.print_exc()
+
+
 def build_multifigures(bundle):
     mode = bundle["mode"]
     items = {}
     for it in bundle["plots"]:
         items.setdefault(it["kind"], []).append(it["data"])
 
-    if mode == "compare" and items.get("cnr_comparison") and items.get("nps_comparison"):
-        c, n = items["cnr_comparison"][0], items["nps_comparison"][0]
-        _stacked_figure([lambda ax: _draw_cnr_bars(ax, c["cnr_1"], c["cnr_2"], c["label_1"], c["label_2"]),
-                         lambda ax: _draw_nps_comparison(ax, n["curves"])],
-                        c["tag"], "Figure_CNR_NPS")
+    def need(name, *kinds):
+        missing = [k for k in kinds if not items.get(k)]
+        if missing:
+            print(f"  Multi-Figure '{name}' übersprungen – fehlende Daten in der .pkl: {', '.join(missing)}")
+        return not missing
 
-    elif mode == "batch" and not _is_wire(bundle) and items.get("kernel_mtf_nps") and items.get("kernel_upsilon"):
+    if mode == "compare" and need("CNR_NPS", "cnr_comparison", "nps_comparison"):
+        c, n = items["cnr_comparison"][0], items["nps_comparison"][0]
+        _guard("CNR_NPS", lambda: _stacked_figure(
+            [lambda ax: _draw_cnr_bars(ax, c["cnr_1"], c["cnr_2"], c["label_1"], c["label_2"]),
+             lambda ax: _draw_nps_comparison(ax, n["curves"])], c["tag"], "Figure_CNR_NPS"))
+
+    elif mode == "batch" and not _is_wire(bundle) and need("MTF_UpsilonNPS", "kernel_mtf_nps", "kernel_upsilon"):
         res, u = items["kernel_mtf_nps"][0]["results"], items["kernel_upsilon"][0]
-        _stacked_figure([lambda ax: _draw_kernel_mtf(ax, res),
-                         lambda ax: _draw_kernel_upsilon(ax, u["kernels"], u["series"])],
-                        "kernels", "Figure_MTF_UpsilonNPS")
+        _guard("MTF_UpsilonNPS", lambda: _stacked_figure(
+            [lambda ax: _draw_kernel_mtf(ax, res),
+             lambda ax: _draw_kernel_upsilon(ax, u["kernels"], u["series"])], "kernels", "Figure_MTF_UpsilonNPS"))
 
     elif mode == "dose":
-        if items.get("cnr_dose") and items.get("nps_dose"):
+        if need("CNR_UpsilonNPS", "cnr_dose", "nps_dose"):
             g_c, g_n = items["cnr_dose"][0]["g"], items["nps_dose"][0]["g"]
-            _stacked_figure([lambda ax: _draw_cnr_dose(ax, g_c), lambda ax: _draw_nps_dose(ax, g_n)],
-                            "dose", "Figure_CNR_UpsilonNPS")
-        by_mat = {d["material"]: d for d in items.get("dprime_dose", [])}
-        mats = [m for m in DPRIME_FIGURE_MATERIALS if m in by_mat]
-        if mats:
-            _stacked_figure([(lambda ax, d=by_mat[m]: _draw_dprime_dose(ax, d["g"], d["material"], d.get("diameter_mm")))
-                             for m in mats], "dose", "Figure_dprime")
+            _guard("CNR_UpsilonNPS", lambda: _stacked_figure(
+                [lambda ax: _draw_cnr_dose(ax, g_c), lambda ax: _draw_nps_dose(ax, g_n)],
+                "dose", "Figure_CNR_UpsilonNPS"))
+        if need("dprime", "dprime_dose"):
+            by_mat = {d["material"]: d for d in items["dprime_dose"]}
+            mats = [m for m in DPRIME_FIGURE_MATERIALS if m in by_mat]
+            absent = [m for m in DPRIME_FIGURE_MATERIALS if m not in by_mat]
+            if absent:
+                print(f"  Hinweis d'-Figure: keine Daten für {', '.join(absent)} (vorhanden: {', '.join(by_mat) or '-'})")
+            if mats:
+                _guard("dprime", lambda: _stacked_figure(
+                    [(lambda ax, d=by_mat[m]: _draw_dprime_dose(ax, d["g"], d["material"], d.get("diameter_mm")))
+                     for m in mats], "dose", "Figure_dprime"))
 
-    elif mode == "linepairs" and items.get("linepair_zoom"):
+    elif mode == "linepairs" and need("grid", "linepair_zoom"):
         for d in items["linepair_zoom"]:
-            _linepair_grid(d["entries"], d["draw_line"], "linepairs",
-                           "Figure_grid_with_line" if d["draw_line"] else "Figure_grid")
+            _guard("grid", lambda d=d: _linepair_grid(d["entries"], d["draw_line"], "linepairs",
+                                                      "Figure_grid_with_line" if d["draw_line"] else "Figure_grid"))
 
 
 # ══════════════════════════════════════════════════════════════════
