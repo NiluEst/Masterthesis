@@ -598,6 +598,7 @@ class QAPipeline:
             "dprime_lowcontrast": dprime_lowcontrast,
             "ctdivol_mgy": scanner["ctdivol_mgy"],
             "uniformity_by_position": uniformity_by_position,
+            "uniformity_center_hu": results.get("uniformity", {}).get("center_hu"),
         }
 
     def run_compare(self, folder_1, folder_2, label_1, label_2, selection, review=False):
@@ -800,6 +801,9 @@ class QAPipeline:
             valid = [r for r in results if r.get("uniformity_by_position")]
             if len(valid) >= 2:
                 self._queue("uniformity_dose", by_position=plotdata.uniformity_dose(valid), y_range=10.0)
+            valid_hu = [r for r in results if r.get("uniformity_center_hu") is not None]
+            if len(valid_hu) >= 2:
+                self._queue("uniformity_center_hu_dose", g=plotdata.uniformity_center_hu_dose(valid_hu))
 
         if selection["nps"]:
             valid = [r for r in results if r.get("upsilon_nps") is not None]

@@ -735,6 +735,25 @@ def _draw_nps_dose(ax, g):
     ax.grid(alpha=0.3)
 
 
+def plot_uniformity_center_hu_dose(g):
+    """Center-HU des CTP486 pro CTDIvol, PCCT vs. EICT (Linien). Erklärt, warum
+    U_i bei EICT prozentual größer wird: der Nenner (Center+100) sinkt mit sinkendem Center-HU."""
+    x = np.arange(len(g["doses"]), dtype=float)
+    fig, ax = _new_fig()
+    for stype in ("PCCT", "EID"):
+        ok = [(xi, y) for xi, y in zip(x, g[stype]) if np.isfinite(y)]
+        if ok:
+            ax.plot(*zip(*ok), linestyle="-" if stype == "PCCT" else "--", marker="o",
+                    color=FAMILY[stype]["color"], markersize=5, label=FAMILY[stype]["label"])
+    ax.axhline(0, color="gray", ls=":", lw=1)
+    ax.set_xticks(x); ax.set_xticklabels([f"{c:.2f}" for c in g["doses"]], rotation=25, ha="right")
+    ax.set_xlabel("CTDIvol group [mGy]"); ax.set_ylabel("Center HU (CTP486)")
+    ax.set_title("CTP486 center HU vs. Dose")
+    _style_legend(ax, headroom=1.2)
+    ax.grid(alpha=0.3)
+    _save(fig, "dose", "Uniformity_center_HU")
+
+
 def plot_nps_dose(g):
     fig, ax = _new_fig()
     _draw_nps_dose(ax, g)
@@ -910,7 +929,7 @@ PLOT_FUNCS = {
     "kernel_mtf_nps": plot_kernel_mtf_nps, "kernel_upsilon": plot_kernel_upsilon,
     "linepair_zoom": plot_linepair_zoom, "linepair_profiles": plot_linepair_profiles,
     "cnr_dose": plot_cnr_dose, "hu_dose": plot_hu_dose, "uniformity_dose": plot_uniformity_dose,
-    "nps_dose": plot_nps_dose, "dprime_dose": plot_dprime_dose,
+    "nps_dose": plot_nps_dose, "uniformity_center_hu_dose": plot_uniformity_center_hu_dose, "dprime_dose": plot_dprime_dose,
 }
 
 

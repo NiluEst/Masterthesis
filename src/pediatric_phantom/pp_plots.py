@@ -114,6 +114,23 @@ def _legend(ax, headroom=1.25, **kw):
     ax.legend(**d)
 
 
+def _dose_ticks(ax, keys, ns, ylabel, n_note="n"):
+    """Dosis-Beschriftung ohne Überlappung: nur die Zahl, nicht gedreht.
+    Ist n bei ALLEN Stufen gleich, steht es einmal in der x-Achsenbeschriftung;
+    sonst bekommt jede Stufe eine zweite Zeile '(n=...)'."""
+    uniq = set(ns)
+    if len(uniq) == 1:
+        labels = [f"{k:.2f}" for k in keys]
+        xlabel = f"CTDIvol (mGy), n = {ns[0]} per dose"
+    else:
+        labels = [f"{k:.2f}\n{n}" for k, n in zip(keys, ns)]
+        xlabel = f"CTDIvol (mGy); lower row: {n_note}"
+    ax.set_xticks(range(len(keys)))
+    ax.set_xticklabels(labels)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+
+
 def _avg(lst):
     vals = [v for v in (lst or []) if v is not None and np.isfinite(v)]
     return float(np.mean(vals)) if vals else None
@@ -217,11 +234,11 @@ def _draw_multi_group_bars(ax, d, cat_key, ylabel=None):
 def _draw_boxplot(ax, m, ctdi_keys, cat_key, metric, color):
     """Boxplot je Dosisstufe (ein Gerät)."""
     x = np.arange(len(ctdi_keys))
-    data, xlab = [], []
+    data, ns = [], []
     for k in ctdi_keys:
         vals = [v for v in m.get(k, {}).get(cat_key, []) if v is not None and np.isfinite(v)]
         data.append(vals)
-        xlab.append(f"{k:.2f} mGy\n(n={len(vals)})")
+        ns.append(len(vals))
     ax.boxplot([dd if dd else [np.nan] for dd in data], positions=x, widths=0.5,
                patch_artist=True, showmeans=True, meanline=True, showfliers=True,
                medianprops=dict(color="black", linewidth=1.6),
@@ -229,8 +246,7 @@ def _draw_boxplot(ax, m, ctdi_keys, cat_key, metric, color):
                boxprops=dict(facecolor=color, alpha=0.75, edgecolor="black"),
                whiskerprops=dict(color="black"), capprops=dict(color="black"),
                flierprops=dict(marker="o", markerfacecolor="black", markersize=3, alpha=0.6))
-    ax.set_xticks(x); ax.set_xticklabels(xlab, rotation=30, ha="right")
-    ax.set_ylabel(metric.upper()); ax.set_xlabel("CTDIvol (mGy)")
+    _dose_ticks(ax, ctdi_keys, ns, metric.upper())
     ax.grid(axis="y", alpha=0.25, zorder=0)
     ax.spines["top"].set_visible(False)
     allv = [v for dd in data for v in dd]
@@ -300,7 +316,7 @@ def _draw_combined_device(d, prefix):
     ax.set_xlim(-stripe_half, n - 1 + stripe_half)
     for i in range(n):
         ax.axvspan(i - stripe_half, i + stripe_half, facecolor=stripes[i % 2], zorder=0, linewidth=0)
-    allv, xlab = [], []
+    allv, ns = [], []
     for i, k in enumerate(keys):
         vp = [v for v in d["map_pcct"].get(k, {}).get(d["cat_key"], []) if v is not None and np.isfinite(v)]
         ve = [v for v in d["map_eict"].get(k, {}).get(d["cat_key"], []) if v is not None and np.isfinite(v)]
@@ -316,9 +332,8 @@ def _draw_combined_device(d, prefix):
                        flierprops=dict(marker="+", markeredgecolor=color, markersize=5,
                                        markeredgewidth=1.2, alpha=0.9))
         np_, ne_ = len(vp), len(ve)
-        xlab.append(f"{k:.2f} mGy\n(n={np_ if np_ == ne_ else f'{np_}/{ne_}'})")
-    ax.set_xticks(range(n)); ax.set_xticklabels(xlab, rotation=30, ha="right")
-    ax.set_ylabel(d["metric"].upper()); ax.set_xlabel("CTDIvol (mGy)")
+        ns.append(np_ if np_ == ne_ else f"{np_}/{ne_}")
+    _dose_ticks(ax, keys, ns, d["metric"].upper(), n_note="n (PCCT/EICT)")
     ax.grid(axis="y", alpha=0.2, zorder=1); ax.spines["top"].set_visible(False)
     if allv:
         lo, hi = min(allv), max(allv); pad = max((hi - lo) * 0.25, 0.05)

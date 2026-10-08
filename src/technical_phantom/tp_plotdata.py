@@ -64,6 +64,16 @@ def uniformity_dose(results, tol=DOSE_TOLERANCE_MGY):
     return out
 
 
+def uniformity_center_hu_dose(results, tol=DOSE_TOLERANCE_MGY):
+    entries = [(float(r["ctdivol_mgy"]), r["scanner_type"], float(r["uniformity_center_hu"]))
+               for r in results
+               if r.get("uniformity_center_hu") is not None and r.get("ctdivol_mgy") is not None]
+    if not entries:
+        print("Keine Uniformity-Center-HU-Daten für Dosis-Plot.")
+        return None
+    return dose_groups(entries, tol)
+
+
 def nps_dose(results, tol=DOSE_TOLERANCE_MGY):
     entries = [(float(r["ctdivol_mgy"]), r["scanner_type"], float(r["upsilon_nps"]))
                for r in results
