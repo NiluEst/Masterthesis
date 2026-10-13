@@ -1165,3 +1165,92 @@ class CombinedReproBuilder:
                           "pcct_label": pcct_label, "eict_label": eict_label,
                           "combined_device": True})
         return plots
+
+
+# ===========================================================================
+# CSV-Export der Plot-Werte (exakt die Zahlen, die in den Plots stehen)
+# ===========================================================================
+class PlotValueExporter:
+    """Schreibt pro Plot-Daten-Dict die gemittelten Werte als lange Tabelle:
+    task, comparison, metric, category, group, ctdivol_mGy, mean, std, n.
+    Mittelwert/Std/n stammen aus denselben Listen wie die Balken im Plot
+    (CTDIvol-Gruppen innerhalb Config.CTDI_TOLERANCE zusammengefasst).
+    FOM-Plots enthalten FOM = Metrik² / CTDIvol je Datensatz, anschließend gemittelt."""
+
+    HEADER = ["task", "comparison", "metric", "category_key", "category", "group",
+              "ctdivol_mGy", "mean", "std", "n"]
+
+    @staticmethod
+    def _stats(vals):
+        arr = np.asarray([v for v in (vals or []) if v is not None], float)
+        arr = arr[np.isfinite(arr)]
+        if arr.size == 0:
+            return None, None, 0
+        return float(np.mean(arr)), float(np.std(arr)), int(arr.size)
+
+    @staticmethod
+    def _categories(d):
+        if d.get("cat_key"):
+            return [(d["cat_key"], d.get("cat_title", d["cat_key"]))]
+        if d.get("per_organ"):
+            return list(d.get("organs", []))
+        return list(PlotBuilder.category_info().items())
+
+    @classmethod
+    def _metric_name(cls, d):
+        m = str(d.get("metric", "")).upper()
+        return ("FOM_" + m) if d.get("is_fom") else m
+
+    @classmethod
+    def rows_for(cls, d: dict, task: str) -> list:
+        out = []
+        metric = cls._metric_name(d)
+        comp = d.get("comp_title") or d.get("title", "")
+
+        def add(cat_key, cat_title, group, ctdi, vals):
+            mean, std, n = cls._stats(vals)
+            if mean is None:
+                return
+            out.append({"task": task, "comparison": comp, "metric": metric,
+                        "category_key": cat_key, "category": cat_title, "group": group,
+                        "ctdivol_mGy": f"{float(ctdi):.3f}", "mean": f"{mean:.6g}",
+                        "std": f"{std:.6g}", "n": n})
+
+        for cat_key, cat_title in cls._categories(d):
+            if d.get("multi"):                                   # 3 Hersteller
+                for lab in d["group_labels"]:
+                    for k in d["ctdi_keys"]:
+                        add(cat_key, cat_title, lab, k, d["maps"][lab].get(k, {}).get(cat_key, []))
+            elif "matches" in d:                                 # Paarvergleich
+                for ctdi_disp, k1, k2 in d["matches"]:
+                    add(cat_key, cat_title, d["label1"], ctdi_disp, d["map1"].get(k1, {}).get(cat_key, []))
+                    add(cat_key, cat_title, d["label2"], ctdi_disp, d["map2"].get(k2, {}).get(cat_key, []))
+            elif d.get("combined_device"):                       # PCCT + EICT Boxplots
+                for k in d["ctdi_keys"]:
+                    add(cat_key, cat_title, d["pcct_label"], k, d["map_pcct"].get(k, {}).get(cat_key, []))
+                    add(cat_key, cat_title, d["eict_label"], k, d["map_eict"].get(k, {}).get(cat_key, []))
+            elif d.get("single_device_single_cat"):              # ein Gerät
+                for k in d["ctdi_keys"]:
+                    add(cat_key, cat_title, d.get("device_label", ""), k, d["map"].get(k, {}).get(cat_key, []))
+        return out
+
+    @classmethod
+    def export(cls, plots: list, task: str, output_path) -> Path | None:
+        rows, seen = [], set()
+        for d in plots:
+            for r in cls.rows_for(d, task):
+                key = tuple(r.values())
+                if key not in seen:          # Duplikate (gleiche Zahl in mehreren Plot-Dicts) vermeiden
+                    seen.add(key)
+                    rows.append(r)
+        if not rows:
+            print("  Keine Plot-Werte für CSV vorhanden.")
+            return None
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", newline="", encoding="utf-8-sig") as fh:   # utf-8-sig: Excel öffnet Umlaute korrekt
+            w = csv.DictWriter(fh, fieldnames=cls.HEADER, delimiter=";")
+            w.writeheader()
+            w.writerows(rows)
+        print(f"  CSV (Plot-Werte): {output_path}  [{len(rows)} Zeilen]")
+        return output_path

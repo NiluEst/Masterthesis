@@ -34,7 +34,7 @@ from matplotlib.lines import Line2D
 
 import pp_paths as paths
 from pp_config import Config
-from pp_plotdata import PlotBuilder, FigureOfMeritBuilder, ComparisonHelpers
+from pp_plotdata import PlotBuilder, FigureOfMeritBuilder, ComparisonHelpers, PlotValueExporter
 
 # ── Einheitlicher Stil (identisch zum technischen Phantom) ──────────
 FIG_SIZE = (5.0, 3.75)      # Breite, Höhe in Zoll – für ALLE Einzelplots
@@ -521,6 +521,10 @@ def render_task(name, plots):
     out = paths.PLOTS_DIR / name
     render(plots, out, prefix=name)
     _OUT_DIR = str(out)
+    try:                                           # Plot-Werte als CSV (wird bei jedem Lauf überschrieben)
+        PlotValueExporter.export(plots, name, paths.CSV_DIR / f"plot_values_{name}.csv")
+    except Exception as ex:
+        print(f"  [Hinweis] CSV der Plot-Werte nicht geschrieben: {ex}")
     if name == "param_PCCT":                       # a=kVp, b=Schichtdicke, c=Kernel
         build_parameter_multipanel(plots, prefix=name, cat_key="liver_muscle")
     elif name == "scanner_comparison":             # a=CNR, b=FOM_CNR
