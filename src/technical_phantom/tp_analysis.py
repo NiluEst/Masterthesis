@@ -322,32 +322,39 @@ class PhantomAnalysis:
     
 
     @staticmethod
-    def eye_filter(freqs_lp_mm, viewing_distance_mm=500.0, c=0.98, gamma=0.68, p=1.5):
+    def eye_filter(freqs_lp_mm, viewing_distance_mm=500.0, magnification=3.0,
+                   n=3.0, c=1.96, a=0.68):
         """
-        Non-prewhitening matched filter mit Eye-Filter (NPWE), nach Burgess/Ishida:
-            E(f) = f^p * exp(-c * f^gamma)
-        f ist die räumliche Frequenz in cycles/degree (Sehwinkel).
+        Visual Transfer Function (VTF) nach Monnin et al. (2026), Gl. 5+6:
+            VTF(u) = u^n · exp(-c · u^a)
+        mit u in cycles/degree:
+            u = (pi/180) · (D/M) · f_lp_mm          (Gl. 6)
 
-        Da unsere TTF/NPS-Kurven in lp/mm vorliegen, wird intern umgerechnet:
-            f_cpd = f_lp_mm * viewing_distance_mm * (pi/180)
-
-        viewing_distance_mm: Betrachtungsabstand zum Monitor (Default 500 mm,
-        gängiger Literaturwert -- ggf. an eure tatsächliche Betrachtungssituation
-        anpassen, das Ergebnis von d' hängt davon ab!).
+        Default-Parameter: L3 aus Monnin Tabelle 2 (Eckstein 2003):
+            n=3.0, c=1.96 deg^-1, a=0.68, D=500 mm, M=3.0
         """
-        f_lp_mm = np.asarray(freqs_lp_mm, float)
-        f_cpd = f_lp_mm * viewing_distance_mm * (np.pi / 180.0)
-        e = np.zeros_like(f_cpd)
-        valid = f_cpd > 0
-        e[valid] = f_cpd[valid] ** p * np.exp(-c * f_cpd[valid] ** gamma)
-        return e
+        f = np.asarray(freqs_lp_mm, float)
+        u = (np.pi / 180.0) * (viewing_distance_mm / magnification) * f
+        vtf = np.zeros_like(u)
+        valid = u > 0
+        vtf[valid] = u[valid] ** n * np.exp(-c * u[valid] ** a)
+        return vtf
     
     @staticmethod
     def compute_detectability_index_ttf(ttf_freqs, ttf_curve, nps_freqs, nps_curve,
                                         diameter_mm, contrast_hu=1.0,
-                                        viewing_distance_mm=500.0, n_points=400):
+                                        viewing_distance_mm=500.0, magnification=3.0,
+                                        n_points=400):
         """
-        d'^2 = [∫ W²·TTF²·E² df]² / ∫ W²·TTF²·NPS·E⁴ df
+        NPWE-Detektierbarkeitsindex nach Monnin et al. (2026), Gl. 4:
+
+          d'_NPWE / C = num / sqrt(den)
+
+        mit 2D-Integral über radiale Frequenz f (Radialsymmetrie, Jacobian 2πf):
+          num = ∫ 2πf · VTF² · TTF² · S_obj² df
+          den = ∫ 2πf · VTF⁴ · TTF² · NPS · S_obj² df
+
+        contrast_hu=1.0 liefert d'/C in HU^-1 (wie im Paper, Tabelle 5).
         """
         ft, tt = np.asarray(ttf_freqs, float), np.asarray(ttf_curve, float)
         fn, nc = np.asarray(nps_freqs, float), np.asarray(nps_curve, float)
@@ -361,14 +368,16 @@ class PhantomAnalysis:
         fc = np.linspace(f_lo, f_hi, n_points)
         ttf_i = np.interp(fc, ft, tt)
         nps_i = np.interp(fc, fn, nc)
-        e = PhantomAnalysis.eye_filter(fc, viewing_distance_mm=viewing_distance_mm)
+        vtf = PhantomAnalysis.eye_filter(fc, viewing_distance_mm=viewing_distance_mm,
+                                         magnification=magnification)
         w = PhantomAnalysis.task_function_disk(diameter_mm, fc, contrast_hu)
 
         trapz_fn = getattr(np, "trapezoid", None) or np.trapz
-        num = trapz_fn((np.abs(w) ** 2) * (ttf_i ** 2) * (e ** 2), fc) ** 2
-        den = trapz_fn((np.abs(w) ** 2) * (ttf_i ** 2) * nps_i * (e ** 4), fc)  # ← nps_i statt nps_i**2
-        d2 = num / max(den, 1e-30)
-        return {"d_prime": float(np.sqrt(max(d2, 0.0))), "d_prime_sq": float(d2)}
+        jac = 2.0 * np.pi * fc                                    # 2D Jacobian
+        num = trapz_fn(jac * w**2 * ttf_i**2 * vtf**2, fc)
+        den = trapz_fn(jac * w**2 * ttf_i**2 * nps_i * vtf**4, fc)
+        d_prime = num / np.sqrt(max(den, 1e-30))
+        return {"d_prime": float(d_prime), "d_prime_sq": float(d_prime**2)}
 
 
     @staticmethod

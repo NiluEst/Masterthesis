@@ -12,7 +12,8 @@ INSERT_ANGLES_DEG = {
 }
 BG_ANGLE_DEG = 247.5                 # Background zwischen Polystyrene und LDPE
 INSERT_CIRCLE_RADIUS_MM = 58.7       # Radius des Insert-Kreises (CTP404)
-INSERT_DIAMETER_MM = 12.2            # physischer Insert-Durchmesser (für d'-Task-Function)
+INSERT_DIAMETER_MM = 12.2            # physischer Insert-Durchmesser für TTF-Kante (Catphan 500: 13.7 mm)
+DPRIME_OBJECT_DIAMETER_MM = 10.0     # Task-Objekt für d' (Monnin et al.: 10 mm ST / 2 mm HR)
 ROI_RADIUS_MM = 4.0                  # Mess-ROI-Radius (kleiner als Insert -> Randabstand)
 
 # Nominale CT-Zahlen (HU), ca. 120 kVp — nur für CT-Number-Accuracy-Ausgabe
