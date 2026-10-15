@@ -159,7 +159,7 @@ def _ratio_bracket(ax, x_dim, lo, hi, ratio, x_text):
 # ══════════════════════════════════════════════════════════════════
 def _draw_pairwise_bars(ax, d, cat_key, cat_title, variability=False):
     """Zwei Gruppen (label1/label2) je CTDIvol-Stufe, optional mit Fehlerbalken; Ratio-Pfeil."""
-    metric = d["metric"].upper()
+    metric = ("FOM_" + d["metric"].upper()) if d.get("is_fom") else d["metric"].upper()
     color1 = d.get("color1") or COLOR_1
     color2 = d.get("color2") or COLOR_2
     w = Config.BAR_WIDTH
@@ -206,7 +206,7 @@ def _draw_pairwise_bars(ax, d, cat_key, cat_title, variability=False):
 
 def _draw_multi_group_bars(ax, d, cat_key, ylabel=None):
     """N (meist 3) Gruppen je CTDIvol-Stufe (Herstellervergleich)."""
-    metric = ylabel or d["metric"].upper()
+    metric = ylabel or (("FOM_" + d["metric"].upper()) if d.get("is_fom") else d["metric"].upper())
     labels = d["group_labels"]
     n = len(labels)
     colors = _distinct_colors(n)
@@ -221,6 +221,13 @@ def _draw_multi_group_bars(ax, d, cat_key, ylabel=None):
         off = (gi - n / 2.0 + 0.5) * bw
         ax.bar(x + off, [v or 0 for v in vals], width=bw, color=colors[gi], alpha=0.9,
                zorder=2, label=lab)
+        for xi, v in zip(x + off, vals):          # Wert über dem Balken, in Balkenfarbe
+            if v is None:
+                continue
+            ax.annotate(f"{v:.2f}", (xi, v), xytext=(0, 2), textcoords="offset points",
+                        ha="center", va="bottom", rotation=90,
+                        fontsize=FONT_SIZE - 4, fontweight="bold",
+                        color=colors[gi], zorder=3)
     ax.set_xticks(x)
     ax.set_xticklabels([f"{k:.2f} mGy" for k in keys], rotation=30, ha="right")
     ax.set_ylabel(metric); ax.set_xlabel("CTDIvol (mGy)")
@@ -252,6 +259,14 @@ def _draw_boxplot(ax, m, ctdi_keys, cat_key, metric, color):
     allv = [v for dd in data for v in dd]
     if allv:
         ax.set_ylim(0, max(allv) * 1.18)
+    # CV-Annotation über jeder Box
+    for i, (k, vals) in enumerate(zip(ctdi_keys, data)):
+        if len(vals) >= 2:
+            mean_v = np.mean(vals)
+            if mean_v > 0:
+                cv = (np.std(vals) / mean_v) * 100
+                ax.text(i, max(vals) + (max(allv) * 0.02), f"{cv:.1f}%",
+                        ha="center", va="bottom", fontsize=8, color="gray")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -331,6 +346,14 @@ def _draw_combined_device(d, prefix):
                        capprops=dict(color=color, linewidth=1.3),
                        flierprops=dict(marker="+", markeredgecolor=color, markersize=5,
                                        markeredgewidth=1.2, alpha=0.9))
+        # --- CV-Annotation über jeder Box ---
+        for vals, pos in [(vp, i - gap / 2), (ve, i + gap / 2)]:
+            if len(vals) >= 2:
+                mean_v = np.mean(vals)
+                if mean_v > 0:
+                    cv = (np.std(vals) / mean_v) * 100
+                    ax.text(pos, max(vals) + (max(allv) * 0.01 if allv else 0.01),
+                            f"{cv:.1f}%", ha="center", va="bottom", fontsize=7, color="gray")
         np_, ne_ = len(vp), len(ve)
         ns.append(np_ if np_ == ne_ else f"{np_}/{ne_}")
     _dose_ticks(ax, keys, ns, d["metric"].upper(), n_note="n (PCCT/EICT)")
