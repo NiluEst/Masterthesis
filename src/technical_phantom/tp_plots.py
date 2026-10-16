@@ -213,7 +213,7 @@ def _family(r):
 def _mtf_axes(ax, unit="lp/mm"):
     ax.axhline(0.5, color="gray", ls="--", lw=1); ax.axhline(0.1, color="gray", ls=":", lw=1)
     ax.set_xlim(left=0); ax.set_ylim(0, 1.05)
-    ax.set_xlabel(f"Spatial Frequency [{unit}]"); ax.set_ylabel("MTF")
+    ax.set_xlabel(f"Spatial Frequency ({unit})"); ax.set_ylabel("MTF")
 
 
 def _paired_bars(ax, x, a_vals, b_vals, w, labels, colors, bracket_left_of_pair=False, ratio_ab=True):
@@ -270,7 +270,7 @@ def _plot_mtf_curve(fr, mtf, m50, m10, unit, title, label, name):
         ax.axvline(m10, color="tab:green", ls="--", lw=1.5, label=f"MTF10 = {m10:.3f} {unit}")
     ax.set_ylim(0, 1.05)
     _cut_x_at_zero(ax, [(fr, mtf)], keep_x=(m50, m10))
-    ax.set_xlabel(f"Spatial Frequency [{unit}]"); ax.set_ylabel("MTF"); ax.set_title(title)
+    ax.set_xlabel(f"Spatial Frequency ({unit})"); ax.set_ylabel("MTF"); ax.set_title(title)
     _style_legend(ax, headroom=1.3)
     ax.grid(alpha=0.3)
     _save(fig, label, name)
@@ -396,7 +396,7 @@ def plot_ttf_dprime(label, ctp404, rois_by_material, ttf_results, dprime_by_mate
                f"| ΔHU={contrast_by_material.get(n, np.nan):.0f}")
         ax.plot(fr_p, ttf_p, color=TTF_COLORS.get(n, "gray"), lw=1.5, label=lbl)
     ax.set_xlim(left=0); ax.set_ylim(0, 1.05)
-    ax.set_xlabel("Freq [lp/mm]"); ax.set_ylabel("TTF"); ax.set_title("TTF (circular edge)")
+    ax.set_xlabel("Freq (lp/mm)"); ax.set_ylabel("TTF"); ax.set_title("TTF (circular edge)")
     _style_legend(ax, headroom=1.6)
     ax.grid(alpha=0.3)
     _save(fig, label, "TTF_3_TTF_dprime")
@@ -447,7 +447,7 @@ def plot_mtf_delta(tag, grid, delta, label):
     fig, ax = _new_fig()
     ax.plot(grid, delta, color="tab:purple", lw=1.5, label=label)
     ax.axhline(0, color="gray", ls="--", lw=1)
-    ax.set_title("ΔMTF"); ax.set_xlabel("Freq [lp/mm]"); ax.set_ylabel("ΔMTF")
+    ax.set_title("ΔMTF"); ax.set_xlabel("Freq (lp/mm)"); ax.set_ylabel("ΔMTF")
     ax.grid(alpha=0.3)
     _style_legend(ax, headroom=1.25)
     _save(fig, tag, "MTF_delta")
@@ -467,7 +467,7 @@ def plot_hu_accuracy_comparison(tag, ct_numbers_1, ct_numbers_2, label_1, label_
     ax.scatter(x + 0.08, [ct_numbers_2.get(n, np.nan) for n in INSERT_NAMES], marker="s", s=40,
                color="tab:orange", label=label_2, zorder=5)
     ax.set_xticks(x); ax.set_xticklabels(INSERT_NAMES, rotation=25, ha="right")
-    ax.set_ylabel("CT number [HU]")
+    ax.set_ylabel("CT number (HU)")
     h, l = ax.get_legend_handles_labels()
     _style_legend(ax, headroom=1.3, handles=h + [Line2D([0], [0], color="black", lw=1.2, ls="--"),
                                patches.Patch(color="gray", alpha=0.15)],
@@ -500,7 +500,7 @@ def plot_uniformity_comparison(tag, u1, u2, label_1, label_2, tol=UNIFORMITY_TOL
     half = max(max(finite, default=0.0) * 2.2, 0.5)
     ax.set_ylim(-half, half); ax.set_xlim(-0.5, len(names) - 0.5)
     ax.set_xticks(x); ax.set_xticklabels(names)
-    ax.set_ylabel("Uniformity index $U_i$ [%]")
+    ax.set_ylabel("Uniformity index $U_i$ (%)")
     ax.text(0.99, 0.03, f"Acceptable range: ±{tol:.0f}%\nReference baseline: 0%", transform=ax.transAxes,
             ha="right", va="bottom", color="gray", style="italic")
     _style_legend(ax, headroom=1.3)
@@ -559,12 +559,12 @@ def _draw_kernel_curves(ax, results, x_key, y_key, smooth, ylabel, xlabel, ylim)
 def _draw_kernel_mtf(ax, results):
     _draw_kernel_curves(ax, results, "mtf_fr_lp_mm", "mtf_curve",
                         lambda r: _smooth_mtf(r["mtf_fr_lp_mm"], r["mtf_curve"], r.get("label", "")),
-                        "MTF", "Spatial Frequency [lp/mm]", (0, 1.05))
+                        "MTF", "Spatial Frequency (lp/mm)", (0, 1.05))
 
 
 def _draw_kernel_nps(ax, results):
     _draw_kernel_curves(ax, results, "nps_freqs", "nps_1d", lambda r: _smooth_nps(r["nps_freqs"], r["nps_1d"]),
-                        "HU²·mm²", "Spatial Frequency [1/mm]", (0, None))
+                        "HU²·mm²", "Spatial Frequency (1/mm)", (0, None))
 
 
 def plot_kernel_mtf_nps(results):
@@ -582,7 +582,7 @@ def _draw_kernel_upsilon(ax, kernels, series):
             ax.plot(*zip(*ok), linestyle="--", marker="x", color=FAMILY[stype]["color"],
                     markersize=5, markeredgewidth=1.2, label=FAMILY[stype]["label"])
     ax.set_xticks(x); ax.set_xticklabels(kernels)
-    ax.set_xlabel("Kernel"); ax.set_ylabel("ΥNPS"); ax.set_title("ΥNPS per kernel")
+    ax.set_xlabel("Kernel"); ax.set_ylabel("ΥNPS (HU)"); ax.set_title("ΥNPS per kernel")
     _style_legend(ax, headroom=1.35)
     ax.grid(alpha=0.3)
 
@@ -691,7 +691,7 @@ def plot_hu_dose(by_material):
         ax.axhline(lim["baseline"], color="black", ls="--", lw=1.0, label="Reference baseline")
         ax.plot(g["doses"], g["PCCT"], "o-", color="tab:orange", markersize=5, label="PCCT")
         ax.plot(g["doses"], g["EID"], "s-", color="tab:blue", markersize=5, label="EICT")
-        ax.set_title(name); ax.set_xlabel("CTDIvol [mGy]"); ax.set_ylabel("HU")
+        ax.set_title(name); ax.set_xlabel("CTDIvol (mGy)"); ax.set_ylabel("HU")
         ax.grid(alpha=0.3)
         _style_legend(ax, headroom=1.3)
         _save(fig, "dose", "HU_accuracy", name)
@@ -714,7 +714,7 @@ def plot_uniformity_dose(by_position, tol=UNIFORMITY_TOLERANCE_PCT, y_range=None
             half = max(max(vals, default=0.0) * 1.8, tol * 1.2)
             ax.set_ylim(-half, half)
         ax.set_title(name, fontweight="bold")
-        ax.set_xlabel("CTDIvol [mGy]"); ax.set_ylabel("$U_i$ [%]")
+        ax.set_xlabel("CTDIvol (mGy)"); ax.set_ylabel("$U_i$ (%)")
         ax.text(0.98, 0.04, f"±{tol:.0f}% acceptable", transform=ax.transAxes, ha="right", va="bottom",
                 color="gray", style="italic")
         ax.grid(alpha=0.3); ax.legend(loc="best")
@@ -729,7 +729,7 @@ def _draw_nps_dose(ax, g):
             ax.plot(*zip(*ok), linestyle="--", marker="x", color=FAMILY[stype]["color"],
                     markersize=5, label=FAMILY[stype]["label"])
     ax.set_xticks(x); ax.set_xticklabels([f"{c:.2f}" for c in g["doses"]])
-    ax.set_xlabel("CTDIvol group [mGy]"); ax.set_ylabel("ΥNPS")
+    ax.set_xlabel("CTDIvol group (mGy)"); ax.set_ylabel("ΥNPS (HU)")
     ax.set_title("ΥNPS vs. Dose: PCCT vs. EICT")
     _style_legend(ax, headroom=1.2)
     ax.grid(alpha=0.3)
@@ -747,7 +747,7 @@ def plot_uniformity_center_hu_dose(g):
                     color=FAMILY[stype]["color"], markersize=5, label=FAMILY[stype]["label"])
     ax.axhline(0, color="gray", ls=":", lw=1)
     ax.set_xticks(x); ax.set_xticklabels([f"{c:.2f}" for c in g["doses"]], rotation=25, ha="right")
-    ax.set_xlabel("CTDIvol group [mGy]"); ax.set_ylabel("Center HU (CTP486)")
+    ax.set_xlabel("CTDIvol group (mGy)"); ax.set_ylabel("Center HU (CTP486)")
     ax.set_title("CTP486 center HU vs. Dose")
     _style_legend(ax, headroom=1.2)
     ax.grid(alpha=0.3)

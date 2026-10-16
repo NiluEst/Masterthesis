@@ -5,7 +5,7 @@ import csv
 import hashlib
 import numpy as np
 import pydicom
-from tp_config import DATA_DIR
+from tp_config import DATA_DIR, HU_ACCURACY_LIMITS, UNIFORMITY_TOLERANCE_PCT
 
 
 def _csv_output_path(filename):
@@ -98,6 +98,9 @@ def _export_kernel_ir_details_to_csv(dataset_list, filename=None):
 def _export_batch_results_to_csv(batch_data):
     all_cnr_materials = sorted({m for e in batch_data for m in (e.get("cnr") or {}).keys()})
     all_dprime_materials = sorted({m for e in batch_data for m in (e.get("dprime") or {}).keys()})
+    all_hu_materials = sorted({m for e in batch_data for m in (e.get("ct_numbers") or {}).keys()})
+    all_u_positions = sorted({p for e in batch_data for p in (e.get("uniformity") or {}).keys()})
+
     payload = json.dumps(batch_data, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
     csv_path = _csv_output_path(f"qa_results_{hashlib.sha1(payload).hexdigest()[:8]}.csv")
     try:
@@ -108,6 +111,15 @@ def _export_batch_results_to_csv(batch_data):
             header += [f"CNR_{m}" for m in all_cnr_materials]
             header += [f"dprime_{m}" for m in all_dprime_materials]
             header += [f"TTF50_{m} (lp/mm)" for m in all_dprime_materials]
+            # HU Accuracy: gemessener Wert, Abweichung zur Baseline, Pass/Fail
+            for m in all_hu_materials:
+                header += [f"HU_{m}", f"HU_{m}_deviation", f"HU_{m}_pass"]
+            # Uniformity: U_i pro Position, Center-HU, Pass/Fail
+            for p in all_u_positions:
+                header += [f"Uniformity_{p} (%)", f"Uniformity_{p}_pass"]
+            if all_u_positions:
+                header += ["Uniformity_center_HU", "Uniformity_all_pass"]
+
             writer.writerow(header)
             for e in batch_data:
                 ctdi, nps = e.get("ctdivol"), e.get("nps")
@@ -117,10 +129,12 @@ def _export_batch_results_to_csv(batch_data):
                        f"{float(nps):.4f}" if nps is not None else "",
                        f"{float(mtf50):.4f}" if mtf50 is not None else "",
                        f"{float(mtf10):.4f}" if mtf10 is not None else ""]
+                # CNR
                 cnr = e.get("cnr") or {}
                 for m in all_cnr_materials:
                     v = cnr.get(m, "")
                     row.append(f"{v:.3f}" if isinstance(v, (int, float)) else "")
+                # d'
                 dprime = e.get("dprime") or {}
                 ttf50 = e.get("ttf50") or {}
                 for m in all_dprime_materials:
@@ -129,6 +143,39 @@ def _export_batch_results_to_csv(batch_data):
                 for m in all_dprime_materials:
                     v = ttf50.get(m, "")
                     row.append(f"{v:.4f}" if isinstance(v, (int, float)) and np.isfinite(v) else "")
+                # HU Accuracy
+                hu = e.get("ct_numbers") or {}
+                for m in all_hu_materials:
+                    v = hu.get(m)
+                    if v is not None and isinstance(v, (int, float)):
+                        lim = HU_ACCURACY_LIMITS.get(m)
+                        if lim:
+                            deviation = v - lim["baseline"]
+                            passed = "PASS" if lim["lower"] <= v <= lim["upper"] else "FAIL"
+                        else:
+                            deviation = ""
+                            passed = ""
+                        row += [f"{v:.2f}", f"{deviation:+.2f}" if isinstance(deviation, (int, float)) else "", passed]
+                    else:
+                        row += ["", "", ""]
+                # Uniformity
+                u = e.get("uniformity") or {}
+                all_pass = True
+                for p in all_u_positions:
+                    v = u.get(p)
+                    if v is not None and isinstance(v, (int, float)):
+                        passed = "PASS" if abs(v) <= UNIFORMITY_TOLERANCE_PCT else "FAIL"
+                        if passed == "FAIL":
+                            all_pass = False
+                        row += [f"{v:.3f}", passed]
+                    else:
+                        row += ["", ""]
+                        all_pass = False
+                if all_u_positions:
+                    c = e.get("uniformity_center_hu")
+                    row.append(f"{c:.2f}" if c is not None else "")
+                    row.append("PASS" if (all_pass and u) else ("FAIL" if u else ""))
+
                 writer.writerow(row)
         print(f"CSV exportiert nach: {csv_path}")
         return csv_path
@@ -209,4 +256,3 @@ def _export_edge_diagnostics_to_csv(batch_data):
     except Exception as ex:
         print(f"Fehler beim Edge-Diagnostik-CSV-Export: {ex}")
         return None
-

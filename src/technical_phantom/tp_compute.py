@@ -16,8 +16,7 @@ from scipy.ndimage import map_coordinates
 
 import tp_plots
 import tp_plotdata as plotdata
-from tp_config import (INSERT_NAMES, NOMINAL_HU, INSERT_DIAMETER_MM, DPRIME_OBJECT_DIAMETER_MM,
-                       DPRIME_TTF_MATERIALS,
+from tp_config import (INSERT_NAMES, NOMINAL_HU, INSERT_DIAMETER_MM, DPRIME_TTF_MATERIALS,
                        UNIFORMITY_POSITIONS_DEG, UNIFORMITY_ROI_RADIUS_MM,
                        WIRE_PHANTOM_WL, WIRE_PHANTOM_WW, RESULTS_DIR)
 from tp_helpers import (_norm_method, _mtf_level, _ask_yes_no, _ask_label, _ask_slice_index,
@@ -128,7 +127,7 @@ class QAPipeline:
 
     def run(self, dicom_folder, dataset_label=None, show_plots=True, review=False,
             do_nps=True, do_cnr=True, do_mtf=True, mtf_method="psb", do_uniformity=True,
-            do_dprime=False, dprime_diameter_mm=DPRIME_OBJECT_DIAMETER_MM,
+            do_dprime=False, dprime_diameter_mm=INSERT_DIAMETER_MM,
             do_dprime_lowcontrast=False, is_wire_phantom=False,
             nps_slice_override=None, nps_region_override=None):
         label = dataset_label or dicom_folder
@@ -629,6 +628,23 @@ class QAPipeline:
             self._queue("uniformity_comparison", tag=tag, u1=r1["uniformity_by_position"],
                         u2=r2["uniformity_by_position"], label_1=label_1, label_2=label_2)
 
+        # CSV-Export für Compare
+        batch_export = []
+        for lb, r in ((label_1, r1), (label_2, r2)):
+            if r.get("cnr_by_material") or r.get("dprime_by_material") or r.get("ct_numbers"):
+                batch_export.append({
+                    "dataset": r["label"], "path": r["dicom_folder"],
+                    "scanner_type": r["scanner_type"], "ctdivol": r["ctdivol_mgy"],
+                    "nps": r["upsilon_nps"], "mtf50": r["mtf50_lp_mm"], "mtf10": r["mtf10_lp_mm"],
+                    "cnr": r["cnr_by_material"], "dprime": r.get("dprime_by_material"),
+                    "ttf50": r.get("ttf50_by_material"),
+                    "ct_numbers": r.get("ct_numbers"),
+                    "uniformity": r.get("uniformity_by_position"),
+                    "uniformity_center_hu": r.get("uniformity_center_hu"),
+                })
+        if batch_export:
+            _export_batch_results_to_csv(batch_export)
+
     def run_batch(self, dataset_list, selection, review=False, is_wire_phantom=False):
         results = []
         propagated = {}  # scanner_type -> {"slice_idx": int, "region": {...}}
@@ -666,13 +682,17 @@ class QAPipeline:
             self._queue("kernel_upsilon", **plotdata.upsilon_per_kernel(valid))
         batch_export = []
         for r in results:
-            if r.get("cnr_by_material") or r.get("dprime_by_material") or len(r["mtf_curve"]):
+            if r.get("cnr_by_material") or r.get("dprime_by_material") or len(r["mtf_curve"]) or r.get("ct_numbers"):
                 batch_export.append({
                     "dataset": r["label"], "path": r["dicom_folder"],
                     "scanner_type": r["scanner_type"], "ctdivol": r["ctdivol_mgy"],
                     "nps": r["upsilon_nps"], "mtf50": r["mtf50_lp_mm"], "mtf10": r["mtf10_lp_mm"],
                     "cnr": r["cnr_by_material"], "dprime": r.get("dprime_by_material"),
-                    "ttf50": r.get("ttf50_by_material")})
+                    "ttf50": r.get("ttf50_by_material"),
+                    "ct_numbers": r.get("ct_numbers"),
+                    "uniformity": r.get("uniformity_by_position"),
+                    "uniformity_center_hu": r.get("uniformity_center_hu"),
+                })
         if batch_export:
             _export_batch_results_to_csv(batch_export)
         else:
@@ -769,7 +789,7 @@ class QAPipeline:
         return entries
 
     def run_dose_series(self, dataset_list, selection, review=False,
-                        dprime_diameter_mm=DPRIME_OBJECT_DIAMETER_MM):
+                        dprime_diameter_mm=INSERT_DIAMETER_MM):
         results = []
         for ds in dataset_list:
             print(f"\n{'─'*60}\nDosis-Serie: {ds['label']} — {ds['folder']}")
@@ -827,15 +847,19 @@ class QAPipeline:
                 else:
                     print(f"Zu wenige Ergebnisse für {material}-Plot.")
 
-        # CSV-Export: CNR, NPS, MTF, d' + TTF50 gemeinsam
+        # CSV-Export: CNR, NPS, MTF, d' + TTF50 + HU-Accuracy + Uniformity gemeinsam
         batch_export = [{"dataset": r["label"], "path": r["dicom_folder"],
                         "scanner_type": r["scanner_type"], "ctdivol": r["ctdivol_mgy"],
                         "nps": r["upsilon_nps"], "mtf50": r["mtf50_lp_mm"], "mtf10": r["mtf10_lp_mm"],
                         "cnr": r["cnr_by_material"], "dprime": r.get("dprime_by_material"),
                         "ttf50": r.get("ttf50_by_material"),
-                        "edge_diag": r.get("edge_diagnostics_by_material")}  # NEU
+                        "edge_diag": r.get("edge_diagnostics_by_material"),
+                        "ct_numbers": r.get("ct_numbers"),
+                        "uniformity": r.get("uniformity_by_position"),
+                        "uniformity_center_hu": r.get("uniformity_center_hu"),
+                        }
                        for r in results
-                       if r.get("cnr_by_material") or r.get("dprime_by_material")]
+                       if r.get("cnr_by_material") or r.get("dprime_by_material") or r.get("ct_numbers")]
         if batch_export:
             _export_batch_results_to_csv(batch_export)
 
@@ -883,7 +907,7 @@ def run_everything(pipeline):
             save_and_plot(pipeline, "batch", tag)
 
         print("\n══ 4/5 Dosis-Serie ══")
-        pipeline.run_dose_series(batch_datasets, sel, review=False, dprime_diameter_mm=DPRIME_OBJECT_DIAMETER_MM)
+        pipeline.run_dose_series(batch_datasets, sel, review=False, dprime_diameter_mm=INSERT_DIAMETER_MM)
         save_and_plot(pipeline, "dose", "series")
 
         print("\n══ 5/5 Linienpaare ══")
@@ -958,9 +982,9 @@ def main():
                 print("Cache gelöscht für:", ds["label"])
         sel = _ask_analysis_selection(is_wire_phantom=False)
         review = _ask_yes_no("Registrierte Slices/ROIs prüfen & ggf. anpassen (Review)?", default=False)
-        diam = input(f"Task-Objekt-Ø für d' in mm [{DPRIME_OBJECT_DIAMETER_MM}]: ").strip()
+        diam = input(f"Insert-Ø (CTP404, Teflon/LDPE) in mm [{INSERT_DIAMETER_MM}]: ").strip()
         pipeline.run_dose_series(batch_datasets, sel, review=review,
-                                 dprime_diameter_mm=float(diam) if diam else DPRIME_OBJECT_DIAMETER_MM)
+                                 dprime_diameter_mm=float(diam) if diam else INSERT_DIAMETER_MM)
         save_and_plot(pipeline, "dose", "series")
 
     elif modus == "5":
