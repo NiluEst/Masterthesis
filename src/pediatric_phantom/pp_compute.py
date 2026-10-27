@@ -1,20 +1,40 @@
 """
-Pediatric Phantom (VOI / TotalSegmentator) – BERECHNUNG
-=======================================================
-Segmentiert jeden Datensatz (TotalSegmentator), berechnet CNR/SNR über das
-gesamte Organ-Volumen (keine ROIs, keine Registrierung, keine Referenz),
-exportiert CSV und zeichnet alle Plots als SVG (nur speichern) über pp_plots.py.
+Pediatric Phantom (VOI / TotalSegmentator) – COMPUTATION (entry point)
+======================================================================
+Main entry point of the paediatric abdomen phantom analysis.
 
-Aufgaben (eigene Pfade in pp_paths.py):
-  1 = Parametervergleich PCCT   (Kernel / Schichtdicke / kVp / FOV)
-  2 = Parametervergleich EICT   (Kernel / Schichtdicke / kVp / FOV)
-  3 = Scannervergleich          (Alpha / X.cite / go.Top) + Multi-Panel CNR/FOM_CNR
-  4 = Reproduzierbarkeit        (EICT + PCCT, einzeln + kombiniert)
-  5 = Alles (1-4 nacheinander)
+For every DICOM series the pipeline
+  1. checks that the folder holds a volumetric axial CT reconstruction
+     (pp_dicom.DicomUtils.is_valid_ct_recon),
+  2. segments the organs with TotalSegmentator (pp_segment.Segmentator,
+     results are cached per SeriesInstanceUID),
+  3. computes CNR/SNR over the whole organ volume, i.e. volumes of interest
+     (VOIs) instead of manually placed ROIs – no registration and no
+     reference dataset are needed (pp_metrics.VolumetricCnrSnr),
+  4. exports the results as CSV, builds the plot data (pp_plotdata) and stores
+     it as a pickle, and
+  5. renders all plots as SVG files (saved only, not shown) via pp_plots.py.
 
-Nur plotten (ohne Neuberechnung einer bereits erzeugten CSV):
-  python pp_plots.py                     (aus gespeicherten Ergebnissen, Menü)
-  python pp_compute.py plots <pfad.csv> [param_PCCT|param_EICT|scanner]   (aus einer CSV)
+Tasks of the interactive menu (input folders are defined in pp_paths.py):
+  1 = Parameter comparison PCCT  (kernel / slice thickness / kVp / FOV);
+      CNR, SNR and figure-of-merit (FOM) plots.
+  2 = Parameter comparison EICT  (kernel / slice thickness / kVp / FOV);
+      same analysis as task 1 for the energy-integrating CT.
+  3 = Scanner comparison         (NAEOTOM Alpha / SOMATOM X.cite / SOMATOM go.Top);
+      multi-panel CNR and FOM_CNR plots, plus CSV files with the mean HU, SD
+      and VOI volume (before/after erosion) per scanner, kV and dose level.
+  4 = Reproducibility            (repeated scans on EICT and PCCT); variability
+      plots per scanner and a combined PCCT + EICT box plot per category.
+  5 = Everything (tasks 1-4 one after another; also the default).
+After choosing a task, the organ pairs (signal,background) are requested;
+pressing Enter uses Config.DEFAULT_ORGAN_PAIRS.
+
+Usage:
+  python pp_compute.py                   (interactive menu, full computation)
+
+Plotting only (without recomputing, from results that already exist):
+  python pp_plots.py                     (from saved results, menu)
+  python pp_compute.py plots <path.csv> [param_PCCT|param_EICT|scanner]   (from a CSV file)
 """
 from __future__ import annotations
 import os
@@ -26,7 +46,13 @@ from pathlib import Path
 import numpy as np
 import torch
 
-import pp_paths as paths
+try:
+    import pp_paths as paths
+except ModuleNotFoundError as exc:
+    if exc.name != "pp_paths":
+        raise
+    raise SystemExit("pp_paths.py not found: copy pp_paths_example.py to pp_paths.py "
+                     "and enter your data paths (see README.md).") from exc
 from pp_config import Config
 from pp_dicom import CacheManager, DicomUtils, FovClassifier
 from pp_segment import Segmentator, load_dicom_series
@@ -37,20 +63,28 @@ import pp_plots
 
 
 # ══════════════════════════════════════════════════════════════════
-# Datensatz-Verarbeitung (Metrik – unveränderte Berechnung)
+# Dataset processing (metric computation)
 # ══════════════════════════════════════════════════════════════════
 def _ask_yes_no(q, default=True):
+    """Ask a Y/N question on the console; any other answer falls back to ``default``."""
     d = "Y" if default else "N"
-    ans = input(f"{q} [Y/N] (Standard: {d}): ").strip().upper()
+    ans = input(f"{q} [Y/N] (default: {d}): ").strip().upper()
     if ans not in ("Y", "N"):
         ans = d
     return ans == "Y"
 
 
 def _ask_organ_pairs():
-    print("\nOrgan-Paare (signal,background;...). Enter = Standard.")
-    print(f"Standard: '{Config.DEFAULT_ORGAN_PAIRS}'")
-    txt = input("Organ-Paare: ").strip() or Config.DEFAULT_ORGAN_PAIRS
+    """
+    Ask for the organ pairs used for CNR (format "signal,background;...").
+
+    Empty input uses Config.DEFAULT_ORGAN_PAIRS. Every pair is registered as a
+    plot category (Config.register_organ_pair_category) so that pairs typed in
+    freely also appear in all plots. Returns a list of (signal, background) tuples.
+    """
+    print("\nOrgan pairs (signal,background;...). Enter = default.")
+    print(f"Default: '{Config.DEFAULT_ORGAN_PAIRS}'")
+    txt = input("Organ pairs: ").strip() or Config.DEFAULT_ORGAN_PAIRS
     pairs = VolumetricCnrSnr.parse_organ_pairs(txt)
     for sig, bg in pairs:
         Config.register_organ_pair_category(sig, bg)
@@ -58,7 +92,27 @@ def _ask_organ_pairs():
 
 
 def _process_dataset(dicom_path, label, organ_pairs, device, do_postprocess=True):
-    """Ein Datensatz: DICOM -> TotalSegmentator -> Vollvolumen-CNR/SNR (gecacht)."""
+    """
+    Process one dataset: DICOM -> TotalSegmentator -> whole-volume CNR/SNR (cached).
+
+    Parameters
+    ----------
+    dicom_path     : folder containing one DICOM series
+    label          : display label of the dataset (folder name)
+    organ_pairs    : list of (signal_organ, background_organ) TotalSegmentator labels
+    device         : "cuda" or "cpu" (passed on to TotalSegmentator)
+    do_postprocess : apply the mask post-processing (component filter / erosion,
+                     see Config.POSTPROCESS_*) before computing CNR/SNR
+
+    The CNR/SNR results are stored in the JSON cache (CacheManager) and reused
+    if the segmentation and the organ pairs are unchanged.
+
+    Returns
+    -------
+    dict with DICOM metadata (CTDIvol, kernel, scanner model, kVp, slice
+    thickness, ...), the segmentation path, the list ``cnr_results`` and the
+    voxel volume in ml – or None if the folder is skipped or processing fails.
+    """
     import traceback
     import nibabel as nib
     sig = CacheManager.dataset_signature(dicom_path)
@@ -66,39 +120,42 @@ def _process_dataset(dicom_path, label, organ_pairs, device, do_postprocess=True
     kernel, mfr, kvp = DicomUtils.read_ct_parameters(dicom_path)
     study_desc = DicomUtils.read_study_description(dicom_path)
     sl_mm = DicomUtils.read_slice_thickness(dicom_path)
-    print(f"  CTDIvol: {ctdi} | Kernel: {kernel} | Modell: {mfr} | kVp: {kvp}")
+    print(f"  CTDIvol: {ctdi} | Kernel: {kernel} | Model: {mfr} | kVp: {kvp}")
 
     ok, reason = DicomUtils.is_valid_ct_recon(dicom_path)
     if not ok:
-        print(f"  [Übersprungen] {reason}")
+        print(f"  [Skipped] {reason}")
         return None
     try:
         sitk_img = load_dicom_series(dicom_path)
     except Exception as exc:
-        print(f"  Fehler beim Laden: {exc}"); traceback.print_exc(); return None
+        print(f"  Error while loading: {exc}"); traceback.print_exc(); return None
     try:
         seg = Segmentator.load_or_run(sitk_img, sig, dataset_label=label, device=device)
     except Exception as exc:
-        print(f"  TotalSegmentator fehlgeschlagen: {exc}"); traceback.print_exc(); return None
+        print(f"  TotalSegmentator failed: {exc}"); traceback.print_exc(); return None
 
     ct_arr, seg_arr = seg["ct_array"], seg["seg_array"]
-    # Voxelvolumen (ml) aus der Segmentierungs-NIfTI – für VOI-Volumen nach Erosion
+    # Voxel volume (ml) from the segmentation NIfTI header (voxel size in mm³ / 1000)
+    # – used to convert VOI voxel counts (before/after erosion) into volumes
     try:
         vox_ml = float(np.prod(nib.load(str(seg["seg_path"])).header.get_zooms()[:3])) / 1000.0
     except Exception as exc:
-        print(f"  [Warnung] Voxelvolumen nicht lesbar: {exc}")
+        print(f"  [Warning] Voxel volume could not be read: {exc}")
         vox_ml = float("nan")
 
+    # Reuse cached CNR/SNR only if they were computed in volumetric mode from the
+    # same segmentation file and with the same organ pairs
     cache_entry = CacheManager.read().get(sig, {})
     reuse = (cache_entry.get("computation_mode") == "volumetric"
              and cache_entry.get("segmentation_path") == str(seg["seg_path"])
              and [list(p) for p in organ_pairs] == [list(p) for p in cache_entry.get("organ_pairs", [])]
              and cache_entry.get("cnr_results"))
     if reuse:
-        print("  [Cache] CNR/SNR übernommen.")
+        print("  [Cache] CNR/SNR reused.")
         cnr_results = cache_entry["cnr_results"]
     else:
-        print("  Berechne CNR/SNR (Vollvolumen, Rohwerte) …")
+        print("  Computing CNR/SNR (whole volume, raw values) …")
         cnr_results, _ = VolumetricCnrSnr.compute(ct_arr, seg_arr, organ_pairs,
                                                   slice_thickness_mm=sl_mm,
                                                   postprocess=do_postprocess)
@@ -118,12 +175,18 @@ def _process_dataset(dicom_path, label, organ_pairs, device, do_postprocess=True
             "voxel_volume_ml": vox_ml}
 
 def _process_root(root, organ_pairs, device, do_postprocess=True):
-    """Alle DICOM-Unterordner eines Wurzelpfades verarbeiten -> dataset_results."""
+    """
+    Process all DICOM subfolders of a root folder.
+
+    Returns the list of successful per-dataset result dicts (see
+    _process_dataset); each entry is additionally tagged with its FOV group
+    (same_fov / different_fov) by FovClassifier.
+    """
     folders = paths.dicom_subfolders(root)
     if not folders:
-        print(f"  Keine DICOM-Ordner gefunden unter: {root}")
+        print(f"  No DICOM folders found under: {root}")
         return []
-    print(f"  {len(folders)} DICOM-Ordner gefunden.")
+    print(f"  {len(folders)} DICOM folders found.")
     results = []
     for i, f in enumerate(folders, 1):
         print(f"\n[{i}/{len(folders)}] {Path(f).name}")
@@ -136,18 +199,30 @@ def _process_root(root, organ_pairs, device, do_postprocess=True):
 
 
 def _results_to_csv(results, name):
+    """Export the dataset results to a time-stamped CSV in paths.CSV_DIR and return its path."""
     paths.CSV_DIR.mkdir(parents=True, exist_ok=True)
     out = paths.CSV_DIR / f"cnr_results_{name}_{datetime.now():%Y%m%d_%H%M%S}.csv"
     CsvExporter.export_csv(results, output_path=out)
     return out
 
+# TotalSegmentator label -> organ name used in the organ HU CSV files
 HU_ORGANS = {"liver": "Liver", "autochthonous_muscle": "Autochthonous muscle",
              "iliopsoas": "Psoas muscle", "psoas": "Psoas muscle"}
 
 
 def _organ_hu_to_csv(results, name):
-    """Mittlere HU, SD und VOI-Volumen (vor/nach Erosion) je Scanner, kV und Dosisstufe."""
+    """
+    Export mean HU, SD and VOI volume (before/after erosion) per organ.
+
+    Writes two CSV files to paths.CSV_DIR:
+      - organ_HU_SD_VOIvolume_per_dataset_*        : one row per dataset and organ
+      - organ_HU_SD_VOIvolume_by_scanner_kV_dose_* : averaged per scanner, kV,
+        dose level (clustered CTDIvol, tolerance Config.CTDI_TOLERANCE) and organ
+    Only the organs listed in HU_ORGANS are exported.
+    """
     import csv
+    # Collect HU statistics per dataset; each organ is taken once (from the
+    # first organ pair in which it occurs as signal or background)
     per_ds = []
     for ds in results:
         seen = {}
@@ -183,8 +258,9 @@ def _organ_hu_to_csv(results, name):
                 "voi_retained_pct": round(pct, 1),
             })
     if not per_ds:
-        print("  Keine Organ-HU-Werte gefunden."); return
+        print("  No organ HU values found."); return
 
+    # Group datasets with nearly identical CTDIvol into common dose levels
     ctdi_map = PlotBuilder.cluster_ctdi_values(
         [r["ctdivol_mGy"] for r in per_ds if r["ctdivol_mGy"] is not None], Config.CTDI_TOLERANCE)
     groups = {}
@@ -221,41 +297,45 @@ def _organ_hu_to_csv(results, name):
         with open(out, "w", newline="", encoding="utf-8") as fh:
             w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
             w.writeheader(); w.writerows(rows)
-        print(f"  Organ-HU-CSV gespeichert: {out}")
+        print(f"  Organ HU CSV saved: {out}")
 
 
 # ══════════════════════════════════════════════════════════════════
-# Plot-Daten je Aufgabe (über die unveränderten Builder in pp_plotdata)
+# Plot data per task (built with the builders in pp_plotdata)
 # ══════════════════════════════════════════════════════════════════
 def _parameter_plots(rows):
+    """Plot data for a parameter comparison: CNR/SNR plots + figure-of-merit plots."""
     return (PlotBuilder.build_all_plot_data(rows)
             + FigureOfMeritBuilder.build_all_fom_plot_data(rows))
 
 
 def _scanner_plots(rows):
+    """Plot data for the three-scanner comparison; returns (cnr_plots, fom_plots)."""
     cnr = PlotBuilder.build_multi_manufacturer_plot_data(rows)
     fom = FigureOfMeritBuilder.build_multi_manufacturer_fom_plot_data(rows)
     return cnr, fom
 
 
 def _save_pkl(name, payload):
+    """Pickle the plot data to paths.RESULTS_DIR so pp_plots.py can re-plot without recomputing."""
     paths.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     p = paths.RESULTS_DIR / f"{name}_{datetime.now():%Y%m%d_%H%M%S}.pkl"
     with open(p, "wb") as fh:
         pickle.dump(payload, fh)
-    print(f"  Plot-Daten gespeichert: {p}")
+    print(f"  Plot data saved: {p}")
 
 
 # ══════════════════════════════════════════════════════════════════
-# Aufgaben
+# Tasks
 # ══════════════════════════════════════════════════════════════════
 def run_parameter(which, organ_pairs, device):
+    """Tasks 1/2: parameter comparison for ``which`` = "PCCT" or "EICT"."""
     root = paths.PARAM_PCCT if which == "PCCT" else paths.PARAM_EICT
     sub = f"param_{which}"
-    print(f"\n=== Parametervergleich {which} ===\n  Pfad: {root}")
+    print(f"\n=== Parameter comparison {which} ===\n  Path: {root}")
     results = _process_root(root, organ_pairs, device)
     if len(results) < 2:
-        print("  Zu wenige Datensätze."); return
+        print("  Too few datasets."); return
     csv_path = _results_to_csv(results, sub)
     rows = PlotReader.filter_rows(PlotReader.read_csv(str(csv_path)))
     plots = _parameter_plots(rows)
@@ -264,11 +344,12 @@ def run_parameter(which, organ_pairs, device):
 
 
 def run_scanner(organ_pairs, device):
+    """Task 3: scanner comparison (NAEOTOM Alpha / SOMATOM X.cite / SOMATOM go.Top) + organ HU CSVs."""
     sub = "scanner_comparison"
-    print(f"\n=== Scannervergleich (Alpha / X.cite / go.Top) ===\n  Pfad: {paths.SCANNER_COMPARISON}")
+    print(f"\n=== Scanner comparison (Alpha / X.cite / go.Top) ===\n  Path: {paths.SCANNER_COMPARISON}")
     results = _process_root(paths.SCANNER_COMPARISON, organ_pairs, device)
     if len(results) < 2:
-        print("  Zu wenige Datensätze."); return
+        print("  Too few datasets."); return
     csv_path = _results_to_csv(results, sub)
     _organ_hu_to_csv(results, sub)
     rows = PlotReader.filter_rows(PlotReader.read_csv(str(csv_path)))
@@ -278,7 +359,14 @@ def run_scanner(organ_pairs, device):
     pp_plots.render_task(sub, all_plots)
 
 def run_reproducibility(organ_pairs, device):
-    print("\n=== Reproduzierbarkeit ===")
+    """
+    Task 4: reproducibility of repeated scans.
+
+    EICT (SOMATOM X.cite) and PCCT (NAEOTOM Alpha) are processed separately
+    (variability plots per scanner); if both are available, a combined
+    PCCT + EICT plot is created as well.
+    """
+    print("\n=== Reproducibility ===")
     out = {}
     for which, root in (("EICT", paths.REPRO_EICT), ("PCCT", paths.REPRO_PCCT)):
         sub = f"repro_{which}"
@@ -295,20 +383,25 @@ def run_reproducibility(organ_pairs, device):
             device_label=which)
         _save_pkl(sub, {"task": sub, "plots": single})
         pp_plots.render_task(sub, single)
-    # Kombiniert: PCCT + EICT in einem Boxplot je Kategorie
+    # Combined: PCCT + EICT in one box plot per category
     if "PCCT" in out and "EICT" in out:
         combined = CombinedReproBuilder.build(out["PCCT"], out["EICT"], "PCCT", "EICT")
         _save_pkl("repro_combined", {"task": "repro_combined", "plots": combined})
         pp_plots.render_task("repro_combined", combined)
     else:
-        print("  Kombinierter Plot übersprungen – es fehlt PCCT oder EICT.")
+        print("  Combined plot skipped – PCCT or EICT is missing.")
 
 
 # ══════════════════════════════════════════════════════════════════
-# Nur-Plot-Modus (aus bestehender CSV, ohne Neuberechnung)
+# Plot-only mode (from an existing CSV, without recomputation)
 # ══════════════════════════════════════════════════════════════════
 def run_plots_from_csv(csv_file, task="param_PCCT"):
-    """Plots direkt aus einer vorhandenen CSV (ohne Segmentierung/Berechnung)."""
+    """
+    Create plots directly from an existing results CSV (no segmentation/computation).
+
+    ``task`` starting with "scanner" -> scanner comparison plots; otherwise
+    parameter comparison plots ("param_PCCT" / "param_EICT", default "param_PCCT").
+    """
     rows = PlotReader.filter_rows(PlotReader.read_csv(csv_file))
     if task.startswith("scanner"):
         cnr_plots, fom_plots = _scanner_plots(rows)
@@ -321,21 +414,22 @@ def run_plots_from_csv(csv_file, task="param_PCCT"):
 # MAIN
 # ══════════════════════════════════════════════════════════════════
 def main():
+    """Command-line entry point: plot-only mode (``plots <csv> [task]``) or the interactive task menu."""
     if len(sys.argv) > 2 and sys.argv[1].lower() == "plots":
         task = sys.argv[3] if len(sys.argv) > 3 else "param_PCCT"
         run_plots_from_csv(sys.argv[2], task)
         return
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print("Pediatric Phantom – Vollvolumen (TotalSegmentator)")
+    print("Pediatric Phantom – whole volume (TotalSegmentator)")
     print(f"  Device: {device}")
-    print("\nAufgabe wählen:")
-    print("  1 = Parametervergleich PCCT")
-    print("  2 = Parametervergleich EICT")
-    print("  3 = Scannervergleich (Alpha / X.cite / go.Top)")
-    print("  4 = Reproduzierbarkeit (EICT + PCCT, einzeln + kombiniert)")
-    print("  5 = Alles")
-    choice = input("Auswahl [1-5] (Standard: 5): ").strip() or "5"
+    print("\nSelect task:")
+    print("  1 = Parameter comparison PCCT")
+    print("  2 = Parameter comparison EICT")
+    print("  3 = Scanner comparison (Alpha / X.cite / go.Top)")
+    print("  4 = Reproducibility (EICT + PCCT, separate + combined)")
+    print("  5 = Everything")
+    choice = input("Choice [1-5] (default: 5): ").strip() or "5"
 
     organ_pairs = _ask_organ_pairs()
 
@@ -353,7 +447,7 @@ def main():
         run_scanner(organ_pairs, device)
         run_reproducibility(organ_pairs, device)
 
-    print("\nFertig.")
+    print("\nDone.")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,16 @@
 """
-Pediatric Phantom – Vollvolumen-CNR/SNR (TotalSegmentator-Masken) + CSV-Export.
-Berechnungslogik unverändert.
+Pediatric Phantom – whole-volume CNR/SNR (TotalSegmentator masks) + CSV export.
+
+Pipeline position: pp_compute.py loads each CT series and its TotalSegmentator
+segmentation, then calls VolumetricCnrSnr.compute() for the configured
+(signal organ, background organ) pairs. The per-dataset results are written to
+CSV by CsvExporter.export_csv(); pp_plotdata.py reads these results/columns back
+to build the plot data.
+
+Contents:
+  - VolumetricCnrSnr : organ masks from label IDs, optional mask clean-up
+                       (component filter + erosion), HU statistics, CNR and SNR.
+  - CsvExporter      : flattens the results of all datasets into one CSV file.
 """
 from __future__ import annotations
 import csv
@@ -14,25 +24,25 @@ from pp_config import Config
 
 class VolumetricCnrSnr:
     """
-    Berechnet CNR und SNR aus TotalSegmentator-Organ-Masken über das gesamte Volumen.
+    Computes CNR and SNR from TotalSegmentator organ masks over the whole volume.
 
-    Ansatz:
-      - Für jedes Organ wird eine binäre Maske aus der Segmentierung extrahiert.
-      - Alle Voxel innerhalb der Maske werden gesammelt.
-      - mean_hu und std_hu werden über ALLE Voxel des Organs berechnet
-        (kein ROI, keine Slice-Auswahl nötig).
+    Approach:
+      - For each organ, a binary mask is extracted from the segmentation.
+      - All voxels inside the mask are collected.
+      - mean_hu and std_hu are computed over ALL voxels of the organ
+        (no hand-drawn ROI, no slice selection needed).
       - CNR = |mean_signal - mean_background| / sqrt(0.5*(std_sig² + std_bg²))
-      - SNR wird für Signal- UND Background-Organ separat berechnet:
+      - SNR is computed separately for the signal AND the background organ:
         SNR_organ = mean_organ / std_organ
-      - KEINE Schichtdicken-Normalisierung (auf expliziten Wunsch deaktiviert):
-        Es werden ausschließlich die rohen, unskalierten CNR/SNR-Werte verwendet.
+      - NO slice-thickness normalisation (deliberately disabled):
+        only the raw, unscaled CNR/SNR values are used.
 
-    Organnamen entsprechen den TotalSegmentator-Labelnamen (Kleinbuchstaben,
-    Leerzeichen als Unterstrich, z. B. "portal_vein", "autochthonous_muscle").
-    Mehrere Label-IDs können über MULTI_LABEL auf einen Namen gemappt werden.
+    Organ names correspond to the TotalSegmentator label names (lower case,
+    spaces replaced by underscores, e.g. "portal_vein", "autochthonous_muscle").
+    Several label IDs can be mapped to one name via MULTI_LABEL.
     """
 
-    # Label-Map: TotalSegmentator "total"-Task v2 (die wichtigsten Organe).
+    # Label map: TotalSegmentator "total" task v2 (organ name -> label ID).
     LABEL_MAP: dict[str, int] = {
     "spleen": 1,
     "kidney_right": 2,
@@ -155,13 +165,13 @@ class VolumetricCnrSnr:
        
 
 
-    # Aliase: ein Name → mehrere Label-IDs (gemeinsame Maske)
+    # Aliases: one name -> several label IDs (combined mask, e.g. left + right)
     MULTI_LABEL: dict[str, list[int]] = {
         "autochthonous_muscle": [86, 87],
         "kidney":               [2, 3],
-        "kidney_parenchyma":    [2, 3],   # Alias für "kidney" (Nierenparenchym, ohne Zysten)
+        "kidney_parenchyma":    [2, 3],   # alias for "kidney" (renal parenchyma, without cysts)
         "iliopsoas":            [88, 89],
-        "psoas":                [88, 89],   # Alias für "iliopsoas" (Musculus iliopsoas / Psoas)
+        "psoas":                [88, 89],   # alias for "iliopsoas" (iliopsoas / psoas muscle)
         "iliac_artery":         [65, 66],
         "iliac_vena":           [67, 68],
         "gluteus_maximus":      [80, 81],
@@ -183,11 +193,13 @@ class VolumetricCnrSnr:
 
     @classmethod
     def _normalize_organ_name(cls, name: str) -> str:
+        """Normalises an organ name to the label-map form ("Portal vein" -> "portal_vein")."""
         return name.strip().lower().replace(" ", "_").replace("-", "_")
 
     @classmethod
     def _label_ids_for_organ(cls, organ: str) -> list[int]:
-        """Gibt die Label-IDs für einen Organnamen zurück. Wirft ValueError bei Unbekannt."""
+        """Returns the label IDs for an organ name (MULTI_LABEL aliases take precedence
+        over LABEL_MAP). Raises ValueError for unknown organs."""
         n = cls._normalize_organ_name(organ)
         if n in cls.MULTI_LABEL:
             return cls.MULTI_LABEL[n]
@@ -197,12 +209,15 @@ class VolumetricCnrSnr:
         known = sorted(list(cls.MULTI_LABEL.keys()) +
                        [k for k, v in cls.LABEL_MAP.items() if v is not None])
         raise ValueError(
-            f"Unbekanntes Organ: '{organ}' (normalisiert: '{n}').\n"
-            f"Bekannte Organe: {known}")
+            f"Unknown organ: '{organ}' (normalised: '{n}').\n"
+            f"Known organs: {known}")
 
     @classmethod
     def parse_organ_pairs(cls, text: str) -> list[tuple[str, str]]:
-        """Parst 'organ1,organ2;organ3,organ4' → [(signal, background), …]."""
+        """Parses 'organ1,organ2;organ3,organ4' → [(signal, background), …].
+
+        Pairs are separated by ';', the two organs of a pair by ','. Empty input
+        returns an empty list; a chunk without exactly two organs raises ValueError."""
         text = (text or "").strip()
         if not text:
             return []
@@ -214,8 +229,8 @@ class VolumetricCnrSnr:
             parts = [p.strip() for p in chunk.split(",")]
             if len(parts) != 2:
                 raise ValueError(
-                    f"Ungültiges Organ-Paar: '{chunk}'. "
-                    f"Erwartet: 'signal_organ,background_organ'")
+                    f"Invalid organ pair: '{chunk}'. "
+                    f"Expected: 'signal_organ,background_organ'")
             pairs.append((parts[0], parts[1]))
         return pairs
 
@@ -223,19 +238,19 @@ class VolumetricCnrSnr:
     def clean_mask(mask: np.ndarray, min_component_voxels: int,
                    erosion_voxels: int, min_final_voxels: int) -> dict:
         """
-        Nachbearbeitung einer binären Organmaske, um präzisere CNR/SNR-ROIs zu erhalten:
+        Post-processes a binary organ mask to obtain more precise CNR/SNR ROIs:
 
-          1) Entfernt kleine, isolierte Fehlsegmentierungen (Connected-Component-Filter):
-             alle zusammenhängenden Komponenten unterhalb `min_component_voxels` werden
-             verworfen.
-          2) Erodiert die verbleibende Maske um `erosion_voxels` Voxel (26er-Nachbarschaft),
-             um Randartefakte und Partial-Volume-Effekte am Organrand auszuschließen.
-          3) Verwirft das ROI vollständig (leere Maske), falls nach der Erosion weniger als
-             `min_final_voxels` Voxel übrig sind — lieber kein Ergebnis als ein durch
-             Fehlsegmentierung verfälschtes.
+          1) Removes small, isolated mis-segmentations (connected-component filter):
+             all connected components smaller than `min_component_voxels` are
+             discarded (only applied if the mask has more than one component).
+          2) Erodes the remaining mask by `erosion_voxels` voxels (26-neighbourhood),
+             to exclude edge artefacts and partial-volume effects at the organ border.
+          3) Discards the ROI completely (empty mask) if fewer than `min_final_voxels`
+             voxels remain after erosion — better no result than one distorted by
+             mis-segmentation.
 
-        Gibt dict mit: mask (bereinigt), discarded, raw_voxels,
-        after_component_filter_voxels, final_voxels zurück.
+        Returns a dict with: mask (cleaned), discarded, raw_voxels,
+        after_component_filter_voxels, final_voxels.
         """
         from scipy import ndimage
 
@@ -246,7 +261,7 @@ class VolumetricCnrSnr:
 
         structure = np.ones((3, 3, 3), dtype=bool)
 
-        # 1) Kleine Fehlsegmentierungen entfernen
+        # 1) Remove small mis-segmentations
         labeled, n_comp = ndimage.label(mask, structure=structure)
         if n_comp > 1:
             sizes    = ndimage.sum(mask, labeled, index=np.arange(1, n_comp + 1))
@@ -256,7 +271,7 @@ class VolumetricCnrSnr:
             filtered = mask
         after_filter_voxels = int(filtered.sum())
 
-        # 2) Erosion um N Voxel (schließt Randartefakte / Partial-Volume aus)
+        # 2) Erosion by N voxels (excludes edge artefacts / partial volume)
         if erosion_voxels > 0 and after_filter_voxels > 0:
             eroded = ndimage.binary_erosion(
                 filtered, structure=structure, iterations=int(erosion_voxels))
@@ -264,7 +279,7 @@ class VolumetricCnrSnr:
             eroded = filtered
         final_voxels = int(eroded.sum())
 
-        # 3) ROI verwerfen, falls zu wenige Voxel übrig
+        # 3) Discard ROI if too few voxels remain
         discarded = final_voxels < min_final_voxels
 
         return {
@@ -282,14 +297,16 @@ class VolumetricCnrSnr:
                     erosion_voxels: int = None,
                     min_final_voxels: int = None) -> dict:
         """
-        Berechnet Statistiken für ein Organ über das gesamte Volumen.
+        Computes HU statistics for one organ over the whole volume.
 
-        Wenn postprocess=True (Standard), wird die rohe Organmaske vorher bereinigt
-        (kleine Fehlsegmentierungen entfernt + Erosion) — CNR/SNR werden dann
-        ausschließlich innerhalb der bereinigten ROI berechnet.
+        If postprocess=True (default), the raw organ mask is cleaned first
+        (small mis-segmentations removed + erosion, see clean_mask()) — CNR/SNR are
+        then computed exclusively inside the cleaned ROI. Clean-up parameters that
+        are None fall back to the Config.POSTPROCESS_* defaults.
 
-        Gibt dict mit organ, label_ids, voxel_count, mean_hu, std_hu, min_hu, max_hu,
-        raw_mask, mask (bereinigt), postprocess_info, discarded zurück.
+        Returns a dict with organ, label_ids, voxel_count, mean_hu, std_hu, min_hu,
+        max_hu (all in HU; NaN if the mask is empty), raw_mask, mask (cleaned),
+        postprocess_info, discarded.
         """
         label_ids = cls._label_ids_for_organ(organ)
         raw_mask  = np.zeros(seg_array.shape, dtype=bool)
@@ -339,33 +356,38 @@ class VolumetricCnrSnr:
                 erosion_voxels: int = None,
                 min_final_voxels: int = None) -> tuple[list[dict], dict[str, dict]]:
         """
-        Berechnet CNR und SNR für alle Organ-Paare über das gesamte Volumen.
+        Computes CNR and SNR for all organ pairs over the whole volume.
 
-        Jedes im organ_pairs vorkommende Organ wird nur EINMAL segmentiert/bereinigt
-        (auch wenn es in mehreren Paaren vorkommt, z. B. die Leber), damit die
-        Nachbearbeitung (Fehlsegment-Filter + Erosion) nicht mehrfach berechnet wird.
+        Every organ occurring in organ_pairs is segmented/cleaned only ONCE
+        (even if it appears in several pairs, e.g. the liver), so that the
+        post-processing (mis-segmentation filter + erosion) is not repeated.
 
-        HINWEIS: slice_thickness_mm / reference_slice_thickness_mm werden NICHT mehr
-        zur Skalierung von CNR/SNR verwendet (keine Schichtdicken-Normalisierung).
-        Sie werden lediglich als Metadaten mitgeführt (z. B. für die CSV-Ausgabe).
+        NOTE: slice_thickness_mm / reference_slice_thickness_mm are NO LONGER used
+        to scale CNR/SNR (no slice-thickness normalisation). They are only carried
+        along as metadata (e.g. for the CSV output).
+
+        Pairs with an unknown organ or with a discarded (too small) ROI are skipped
+        with a warning.
 
         Parameters
         ----------
-        ct_array                     : 3D CT-Array (z, y, x) in HU
-        seg_array                    : 3D Segmentierungs-Array (z, y, x)
-        organ_pairs                  : Liste von (signal_organ, background_organ)
-        slice_thickness_mm           : Schichtdicke des aktuellen Datensatzes (nur Metadaten)
-        reference_slice_thickness_mm : Schichtdicke der Referenz (nur Metadaten)
-        postprocess                  : Segmentierungs-Nachbearbeitung anwenden (Standard: True)
-        min_component_voxels/erosion_voxels/min_final_voxels : siehe clean_mask();
-                                        None = Config-Standardwerte verwenden
+        ct_array                     : 3D CT array (z, y, x) in HU
+        seg_array                    : 3D segmentation label array (z, y, x)
+        organ_pairs                  : list of (signal_organ, background_organ)
+        slice_thickness_mm           : slice thickness of the current dataset (metadata only)
+        reference_slice_thickness_mm : slice thickness of the reference (metadata only)
+        postprocess                  : apply segmentation post-processing (default: True)
+        min_component_voxels/erosion_voxels/min_final_voxels : see clean_mask();
+                                        None = use Config defaults
 
         Returns
         -------
-        (results, organ_stats_cache) — organ_stats_cache enthält pro Organname
-        raw_mask/mask/postprocess_info für die Vorher/Nachher-Visualisierung.
+        (results, organ_stats_cache) — results is one dict per evaluated pair
+        (HU statistics, voxel counts, cnr/snr/signal_snr/background_snr and their
+        *_raw variants); organ_stats_cache holds, per organ name,
+        raw_mask/mask/postprocess_info for the before/after visualisation.
         """
-        # Jedes Organ nur einmal auswerten (Cache über alle Paare hinweg)
+        # Evaluate each organ only once (cache shared across all pairs)
         unique_organs: list[str] = []
         for a, b in organ_pairs:
             for o in (a, b):
@@ -381,32 +403,32 @@ class VolumetricCnrSnr:
                     erosion_voxels=erosion_voxels,
                     min_final_voxels=min_final_voxels)
             except ValueError as exc:
-                print(f"  [Warnung] Organ '{o}' übersprungen: {exc}")
+                print(f"  [Warning] Organ '{o}' skipped: {exc}")
 
         results = []
         for sig_organ, bg_organ in organ_pairs:
             sig_stats = organ_stats_cache.get(sig_organ)
             bg_stats  = organ_stats_cache.get(bg_organ)
             if sig_stats is None or bg_stats is None:
-                print(f"  [Warnung] Organ-Paar ({sig_organ}, {bg_organ}) übersprungen "
-                      f"(unbekanntes Organ).")
+                print(f"  [Warning] Organ pair ({sig_organ}, {bg_organ}) skipped "
+                      f"(unknown organ).")
                 continue
 
             if sig_stats["voxel_count"] == 0:
-                print(f"  [Warnung] Signal-Organ '{sig_organ}' hat 0 Voxel "
-                      f"(Label-IDs: {sig_stats['label_ids']}).")
+                print(f"  [Warning] Signal organ '{sig_organ}' has 0 voxels "
+                      f"(label IDs: {sig_stats['label_ids']}).")
             if bg_stats["voxel_count"] == 0:
-                print(f"  [Warnung] Hintergrund-Organ '{bg_organ}' hat 0 Voxel "
-                      f"(Label-IDs: {bg_stats['label_ids']}).")
+                print(f"  [Warning] Background organ '{bg_organ}' has 0 voxels "
+                      f"(label IDs: {bg_stats['label_ids']}).")
 
             if sig_stats.get("discarded"):
-                print(f"  [Warnung] Signal-ROI '{sig_organ}' nach Nachbearbeitung "
-                      f"[DISCARDED – too few voxels] — Paar ({sig_organ}, {bg_organ}) "
-                      f"übersprungen.")
+                print(f"  [Warning] Signal ROI '{sig_organ}' after post-processing "
+                      f"[DISCARDED – too few voxels] — pair ({sig_organ}, {bg_organ}) "
+                      f"skipped.")
             if bg_stats.get("discarded"):
-                print(f"  [Warnung] Hintergrund-ROI '{bg_organ}' nach Nachbearbeitung "
-                      f"[DISCARDED – too few voxels] — Paar ({sig_organ}, {bg_organ}) "
-                      f"übersprungen.")
+                print(f"  [Warning] Background ROI '{bg_organ}' after post-processing "
+                      f"[DISCARDED – too few voxels] — pair ({sig_organ}, {bg_organ}) "
+                      f"skipped.")
             if sig_stats.get("discarded") or bg_stats.get("discarded"):
                 continue
 
@@ -416,6 +438,7 @@ class VolumetricCnrSnr:
             bg_std   = bg_stats["std_hu"]
 
             # CNR = |mean_sig - mean_bg| / sqrt(0.5*(std_sig² + std_bg²))
+            # (pooled noise of both organs; NaN if the denominator is ~0)
             if np.isfinite(sig_std) and np.isfinite(bg_std):
                 denom = float(np.sqrt(0.5 * (sig_std ** 2 + bg_std ** 2)))
                 cnr   = (float(abs(bg_mean - sig_mean) / denom)
@@ -423,18 +446,18 @@ class VolumetricCnrSnr:
             else:
                 cnr = float("nan")
 
-            # SNR fuer das Signal-Organ = mean_signal / std_signal
+            # SNR of the signal organ = mean_signal / std_signal
             snr = (float(sig_mean / sig_std)
                    if (np.isfinite(sig_std) and sig_std > 1e-12) else float("nan"))
 
-            # SNR fuer das Background-Organ = mean_background / std_background
-            # (fuer organ-basierte SNR-Plots, da SNR pro Organ und nicht pro Paar gilt)
+            # SNR of the background organ = mean_background / std_background
+            # (for organ-based SNR plots, since SNR is defined per organ, not per pair)
             bg_snr = (float(bg_mean / bg_std)
                       if (np.isfinite(bg_std) and bg_std > 1e-12) else float("nan"))
 
-            # KEINE Schichtdicken-Normalisierung mehr (auf expliziten Wunsch deaktiviert).
-            # "norm"-Werte sind identisch zu den Rohwerten; die Felder bleiben aus
-            # Kompatibilitätsgründen (z. B. bestehende CSV-Spalten) erhalten.
+            # NO slice-thickness normalisation any more (deliberately disabled).
+            # The "norm" values are identical to the raw values; the fields are kept
+            # for compatibility (e.g. existing CSV columns).
             cnr_norm = cnr
             snr_norm = snr
             bg_snr_norm = bg_snr
@@ -480,17 +503,18 @@ class VolumetricCnrSnr:
 
     @staticmethod
     def print_results(dataset_label: str, results: list) -> None:
-        print(f"\nVollvolumen CNR/SNR für {dataset_label}:")
+        """Prints the per-pair results of compute() to the console."""
+        print(f"\nWhole-volume CNR/SNR for {dataset_label}:")
         if not results:
-            print("  Keine gültigen Organ-Paare ausgewertet.")
+            print("  No valid organ pairs evaluated.")
             return
         for r in results:
             def _fmt(v):
                 return f"{v:.3f}" if np.isfinite(v) else "n/a"
             print(f"  [{r['signal_organ']} | {r['background_organ']}]"
-                  f"  Voxel (bereinigt): sig={r['signal_voxel_count']:,}  "
+                  f"  Voxels (cleaned): sig={r['signal_voxel_count']:,}  "
                   f"bg={r['background_voxel_count']:,}  "
-                  f"(roh: sig={r.get('signal_voxel_count_raw','?')}, "
+                  f"(raw: sig={r.get('signal_voxel_count_raw','?')}, "
                   f"bg={r.get('background_voxel_count_raw','?')})")
             print(f"    Signal:     mean={r['signal_mean_hu']:.1f} HU  "
                   f"std={r['signal_std_hu']:.1f} HU  SNR={_fmt(r.get('signal_snr', r.get('snr')))}")
@@ -500,32 +524,37 @@ class VolumetricCnrSnr:
 
 
 # ===========================================================================
-# Segmentator
+# CSV export
 # ===========================================================================
 
 
 
 class CsvExporter:
-    """CSV-Export der CNR/SNR-Ergebnisse (unverändert)."""
+    """CSV export of the CNR/SNR results (one row per dataset and organ pair)."""
 
     @classmethod
     def export_csv(cls, dataset_results: list, output_path=None) -> Path:
         """
-        Exportiert alle Ergebnisse in eine CSV-Datei.
-        Unterstützt beide Modi:
-          • Vollvolumen (computation_mode="volumetric"): Organ-basierte Spalten
-          • Legacy ROI-Modus: ROI-ID- und 3-Slice-Spalten
+        Exports all results to one CSV file.
+        Supports both modes:
+          • whole volume (computation_mode="volumetric"): organ-based columns
+          • legacy ROI mode: ROI-ID and 3-slice columns (empty in volumetric mode)
 
-        Enthält zusätzlich die FOV-Klassifikation (fov_group,
-        reconstruction_diameter_mm), sofern FovClassifier.classify() vorher
-        auf dataset_results aufgerufen wurde.
+        Additionally contains the FOV classification (fov_group,
+        reconstruction_diameter_mm), provided FovClassifier.classify() was
+        called on dataset_results beforehand.
+
+        If output_path is None, the file is written to
+        csv_outputs/cnr_results/cnr_results_<timestamp>.csv next to this module.
+        The column names are read back by pp_plotdata.py – do not rename them.
+        Returns the path of the CSV file (nothing is written if there are no rows).
         """
         rows = []
         for ds in dataset_results or []:
             mode = ds.get("computation_mode", "roi")
             for r in ds.get("cnr_results", []):
                 base = {
-                    # --- Datensatz-Metadaten ---
+                    # --- dataset metadata ---
                     "dataset_label":                    ds.get("label", ""),
                     "dataset_path":                     ds.get("path", ""),
                     "series_instance_uid":              ds.get("series_instance_uid", ""),
@@ -537,41 +566,41 @@ class CsvExporter:
                     "manufacturer":                     ds.get("manufacturer", ""),
                     "kvp":                               ds.get("kvp", ""),
                     "computation_mode":                 mode,
-                    # --- FOV-Klassifikation (NEU) ---
+                    # --- FOV classification ---
                     "fov_group":                        ds.get("fov_group", ""),
                     "reconstruction_diameter_mm":        ds.get("reconstruction_diameter_mm", ""),
-                    # --- Organ / ROI-Bezeichnungen ---
+                    # --- organ / ROI names ---
                     "signal_organ":                     r.get("signal_organ",
                                                               r.get("signal_roi_label", "")),
                     "background_organ":                 r.get("background_organ",
                                                               r.get("background_roi_label", "")),
                     "signal_roi_label":                 r.get("signal_roi_label", ""),
                     "background_roi_label":             r.get("background_roi_label", ""),
-                    # --- Vollvolumen-Felder (nur neuer Modus) ---
+                    # --- whole-volume fields (volumetric mode only) ---
                     "signal_voxel_count":               r.get("signal_voxel_count", ""),
                     "background_voxel_count":           r.get("background_voxel_count", ""),
                     "signal_min_hu":                    r.get("signal_min_hu", ""),
                     "signal_max_hu":                    r.get("signal_max_hu", ""),
                     "background_min_hu":                r.get("background_min_hu", ""),
                     "background_max_hu":                r.get("background_max_hu", ""),
-                    # --- Gemeinsame HU-Felder ---
+                    # --- HU fields common to both modes ---
                     "signal_mean_hu":                   r.get("signal_mean_hu", ""),
                     "signal_std_hu":                    r.get("signal_std_hu", ""),
                     "background_mean_hu":               r.get("background_mean_hu", ""),
                     "background_std_hu":                r.get("background_std_hu", ""),
-                    # --- CNR / SNR ---
+                    # --- CNR / SNR ("normalized" = raw, no normalisation applied) ---
                     "cnr_raw":                          r.get("cnr_raw", r.get("cnr", "")),
                     "cnr_normalized":                   r.get("cnr", ""),
                     "snr_raw":                          r.get("snr_raw", r.get("snr", "")),
                     "snr_normalized":                   r.get("snr", ""),
-                    # --- SNR je Einzelorgan (Signal- und Background-Organ getrennt) ---
+                    # --- SNR per individual organ (signal and background organ separately) ---
                     "signal_snr_raw":                   r.get("signal_snr_raw", r.get("snr_raw", r.get("snr", ""))),
                     "signal_snr":                        r.get("signal_snr", r.get("snr", "")),
                     "background_snr_raw":                r.get("background_snr_raw", ""),
                     "background_snr":                    r.get("background_snr", ""),
-                    # --- Segmentierung ---
+                    # --- segmentation ---
                     "segmentation_path":                ds.get("segmentation_path", ""),
-                    # --- Legacy ROI-Felder (nur alter Modus, sonst leer) ---
+                    # --- legacy ROI fields (old mode only, otherwise empty) ---
                     "signal_roi_id":                    r.get("signal_roi_id", ""),
                     "background_roi_id":                r.get("background_roi_id", ""),
                     "selected_slice_idx":               ds.get("selected_slice_idx", ""),
@@ -602,10 +631,5 @@ class CsvExporter:
                 writer = csv.DictWriter(fh, fieldnames=fieldnames)
                 writer.writeheader()
                 writer.writerows(rows)
-        print(f"\nCNR-CSV gespeichert unter: {output_path}")
+        print(f"\nCNR CSV saved to: {output_path}")
         return output_path
-
-
-# ===========================================================================
-# VolumetricCnrSnr  (Vollvolumen-Berechnung via TotalSegmentator-Masken)
-# ===========================================================================

@@ -220,3 +220,15 @@ __marimo__/
 #berechnete Plot-Daten und Plots
 output_data/*
 
+# ── Local, user-specific files (not published) ──
+# Private data paths – copy the *_example.py templates and fill in your own paths
+src/pediatric_phantom/pp_paths.py
+src/technical_phantom/tp_datasets.py
+# Local helper / debug scripts
+check.py
+src/pediatric_phantom/test.py
+# Local data overviews and old caches (contain internal server paths)
+DICOM_Uebersicht*.xlsx
+src/Results/
+src/pediatric_phantom/roi_selection_cache.json
+

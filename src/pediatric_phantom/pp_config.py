@@ -1,8 +1,10 @@
 """
-Pediatric Phantom (VOI/TotalSegmentator) – Konfiguration
+Pediatric Phantom (VOI/TotalSegmentator) – configuration
 ========================================================
-Alle anpassbaren Parameter: Organ-Paare, Kategorien, Plot-/UI-Konstanten.
-Dateipfade stehen separat in pp_paths.py.
+Central configuration of the paediatric phantom analysis (pp_* modules):
+organ pairs for CNR/SNR, organ-pair plot categories, segmentation
+post-processing, FOV classification and plot/comparison settings.
+File paths are defined separately in pp_paths.py.
 """
 from __future__ import annotations
 from pathlib import Path
@@ -10,43 +12,31 @@ from pathlib import Path
 
 class Config:
     """
-    Zentrale Konfiguration.
-    Hier werden ALLE anpassbaren Parameter definiert.
+    Central configuration.
+    ALL adjustable parameters are defined here (as class attributes).
     """
 
     # -------------------------------------------------------------------
-    # Pfade
+    # Organ pairs (signal organ, background organ)
     # -------------------------------------------------------------------
 
-
-
-    CSV_FILE: str = ""   # wird zur Laufzeit gesetzt
-
-    # -------------------------------------------------------------------
-    # Labels
-    # -------------------------------------------------------------------
-
-    # -------------------------------------------------------------------
-    # CNR-Paare (Signal-ROI-ID, Background-ROI-ID)
-    # -------------------------------------------------------------------
-    DEFAULT_CNR_PAIRS  = "1,8;5,6"
-
-    # Organ-Paare für den neuen vollautomatischen Vollvolumen-Modus.
+    # Default organ pairs for the fully automatic whole-volume mode.
     # Format: "signal_organ,background_organ;signal2,background2"
-    # Organnamen: TotalSegmentator-Labelnamen (Kleinbuchstaben, _ statt Leerzeichen)
+    # Organ names: TotalSegmentator label names (lower case, _ instead of spaces)
     #
-    # Getauschte Organ-Paare (gut vom TotalSegmentator erkannt):
-    #   Leber, Milz, Psoas-Muskel (iliopsoas), Autochthone Rückenmuskulatur, Niere (Parenchym)
-    #   Nieren-Psoas-Paar ist optional, aber standardmäßig aktiviert — bei Bedarf einfach
-    #   aus der Zeile unten entfernen bzw. beim interaktiven Prompt weglassen.
+    # Organs that TotalSegmentator segments reliably in the phantom:
+    #   liver, spleen, psoas muscle (iliopsoas), autochthonous back muscles, kidney (parenchyma)
+    #   A kidney–psoas pair is optional and currently not part of the default
+    #   (see the commented-out "kidney_psoas" category below); pairs can be
+    #   changed here or entered at the interactive prompt.
     DEFAULT_ORGAN_PAIRS = ("liver,spleen;"
                            "liver,iliopsoas;"
                            "liver,autochthonous_muscle;"
                            "spleen,iliopsoas")
 
     # -------------------------------------------------------------------
-    # Kategorie-Zuordnung für Organ-Paare (einzige Quelle der Wahrheit für
-    # alle Vergleichs-/CNR-Plots). slug -> (signal_organ, background_organ, Anzeige-Label)
+    # Category mapping for organ pairs (single source of truth for all
+    # comparison/CNR plots). slug -> (signal_organ, background_organ, display label)
     # -------------------------------------------------------------------
     ORGAN_PAIR_CATEGORIES: dict[str, tuple[str, str, str]] = {
         "liver_spleen": ("liver",  "spleen",               "Liver – Spleen"),
@@ -56,8 +46,9 @@ class Config:
         #"kidney_psoas": ("kidney", "iliopsoas",              "Kidney – Psoas (optional)"),
     }
 
-    # Aliase für die Kategorie-Zuordnung (z. B. falls "psoas" statt "iliopsoas"
-    # oder "kidney_parenchyma" statt "kidney" verwendet wird)
+    # Aliases for the category mapping (e.g. if "psoas" is used instead of
+    # "iliopsoas" or "kidney_parenchyma" instead of "kidney"). Keys are the
+    # normalised names (lower case, "_" replaced by spaces).
     ORGAN_NAME_ALIASES: dict[str, str] = {
         "psoas":               "iliopsoas",
         "psoas muscle":        "iliopsoas",
@@ -70,100 +61,46 @@ class Config:
     }
 
     # -------------------------------------------------------------------
-    # ROI-Label-Mapping (muss mit dem Phantom-Layout übereinstimmen)
+    # CNR category plot (single-dataset comparison)
     # -------------------------------------------------------------------
-    ROI_LABELS_BY_ID: dict[int, str] = {
-        1: "portal_vein",
-        2: "portal_vein",
-        3: "fat",
-        4: "fat",
-        5: "aorta",
-        6: "autochthonous muscle",
-        7: "autochthonous muscle",
-        8: "liver",
-    }
-
-    # -------------------------------------------------------------------
-    # UI-Einstellungen ROI-Übersicht
-    # -------------------------------------------------------------------
-    ROI_LABEL_FONT_SIZE     = 30
-    ROI_LABEL_OFFSET_X      = 35
-    ROI_LABEL_OFFSET_Y      = -25
-    ROI_LABEL_COLOR         = "yellow"
-    ROI_LABEL_ARROW_LW      = 1.2
-    ROI_OVERVIEW_TITLE_FONT_SIZE = 35
-    ROI_OVERVIEW_TITLE_Y    = 1.12
-    ROI_OVERVIEW_TITLE_PAD  = 0
-
-    # -------------------------------------------------------------------
-    # NPS
-    # -------------------------------------------------------------------
-    NPS_WINDOW_LEVEL      = 50.0
-    NPS_WINDOW_WIDTH      = 400.0
-    NPS_PATCH_SIZE_MM     = 10.0
-    NPS_RADIUS_MM         = 80.0
-    NPS_DEFAULT_RECT_MM   = 60.0
-    NPS_MIN_RECT_PX       = 8
-    NPS_RADIAL_BIN_COUNT  = 180
-    NPS_PATCH_OVERLAP     = 0.5   # 50% Ueberlappung fuer stabilere NPS-Mittelung
-    NPS_SMOOTH_WINDOW     = 9     # 1D-Glattung (ungerade Fensterlaenge)
-
-    # -------------------------------------------------------------------
-    # CNR-Kategorie-Plot (Einzel-Datensatz-Vergleich)
-    # -------------------------------------------------------------------
-    CNR_PLOT_TITLE            = ""
-    CNR_PLOT_TITLE_FONT_SIZE  = 15
-    CNR_PLOT_AXIS_LABEL_FONT_SIZE = 20
-    CNR_PLOT_TICK_FONT_SIZE   = 20
-    CNR_PLOT_LEGEND_FONT_SIZE = 15
-    # Wird aus ORGAN_PAIR_CATEGORIES (s.o.) automatisch abgeleitet
+    # Derived automatically from ORGAN_PAIR_CATEGORIES (see above)
     CNR_PLOT_CATEGORY_LABELS  = [v[2] for v in ORGAN_PAIR_CATEGORIES.values()]
-    CNR_PLOT_BAR_WIDTH        = 0.36
-    CNR_PLOT_COLORS           = ["#F58518", "#4C78A8"]
 
     # -------------------------------------------------------------------
-    # Segmentierungs-Nachbearbeitung (für saubere CNR/SNR-ROIs)
+    # Segmentation post-processing (for clean CNR/SNR VOIs)
     # -------------------------------------------------------------------
-    # Kleine, isolierte Fehlsegmentierungen unterhalb dieser Voxelzahl werden entfernt
-    # (Connected-Component-Filter)
+    # Small isolated mis-segmentations below this number of voxels are removed
+    # (connected-component filter)
     POSTPROCESS_MIN_COMPONENT_VOXELS = 50
-    # Erosion in Voxeln (2–3 empfohlen), um Randartefakte / Partial-Volume-Effekte
-    # am Organrand auszuschließen
+    # Erosion in voxels (2–3 recommended) to exclude edge artefacts /
+    # partial-volume effects at the organ boundary
     POSTPROCESS_EROSION_VOXELS = 2
-    # ROI wird komplett verworfen, wenn nach der Nachbearbeitung weniger Voxel übrig sind
+    # The VOI is discarded completely if fewer voxels remain after post-processing
     POSTPROCESS_MIN_FINAL_VOXELS = 200
 
     # -------------------------------------------------------------------
-    # FOV-Klassifikation (same_fov / different_fov) — Muster-basiert
+    # FOV classification (same_fov / different_fov) — pattern-based
     # -------------------------------------------------------------------
-    # Zwei FOV-Werte (Reconstruction Diameter, mm) gelten als "gleich",
-    # wenn ihr Abstand <= dieser Toleranz ist. Wird von FovClassifier
-    # genutzt, um FOV-Werte über den gesamten Datensatz zu clustern.
+    # Two FOV values (Reconstruction Diameter, mm) count as "equal" if their
+    # difference is <= this tolerance. Used by FovClassifier to cluster the
+    # FOV values across all datasets.
     FOV_CLUSTER_TOLERANCE_MM = 0.5
 
     # -------------------------------------------------------------------
-    # Vergleichs-Plot (multi-CSV)
+    # Comparison plots (multi-CSV)
     # -------------------------------------------------------------------
-    CTDI_TOLERANCE         = 0.05   # mGy – gilt noch als gleich
-    EXCLUDE_LABEL          = ""    # keine Referenz mehr -> nichts ausschließen
+    CTDI_TOLERANCE         = 0.05   # mGy – CTDIvol values closer than this count as equal
+    EXCLUDE_LABEL          = ""    # no reference dataset any more -> exclude nothing
     COLOR_1                = "#378ADD"
     COLOR_2                = "#D85A30"
     COLOR_RATIO            = "#5F5E5A"
-    RATIO_FONT_SIZE         = 11
-    RATIO_ARROW_COLOR       = "black"
-    RATIO_ARROW_LINEWIDTH   = 1.2
-    RATIO_YLIM_HEADROOM     = 1.22
     RATIO_MAX_SUBPLOTS_SIDE = 2
-    PLOT_TITLE_FONT_SIZE   = 20
-    SUBPLOT_TITLE_SIZE     = 20
-    AXIS_LABEL_FONT_SIZE   = 20
-    TICK_FONT_SIZE         = 20
-    LEGEND_FONT_SIZE       = 15
-    VALUE_LABEL_FONT_SIZE  = 20
     BAR_WIDTH              = 0.35
-    FIGURE_SIZE            = (18, 8.5)
-    RATIO_BRACKET_FONT_SIZE = 10   # NEU: kleinere Schrift für Maßpfeil-Ratio-Labels
 
+    # Pairwise comparisons: datasets with column == val1 vs. column == val2;
+    # "fixed_filters" keep the other parameters constant ("kernel_prefix" =
+    # compare only the leading letters + digits of the kernel name,
+    # case-insensitive, e.g. "Br40f" matches "br40")
     COMPARISONS = [
         {
             "title":  "Kernel: Br40 vs. Br64",
@@ -203,6 +140,8 @@ class Config:
         },
     ]
 
+    # Three-way scanner comparison; "match" is matched against the
+    # manufacturer column (ManufacturerModelName)
     MULTI_MANUFACTURER_COMPARISON = {
         "title": "Manufacturer: NAEOTOM Alpha vs. SOMATOM X.cite vs. SOMATOM go.Top",
         "column": "manufacturer",
@@ -217,28 +156,22 @@ class Config:
     
 
     # -------------------------------------------------------------------
-    # Hilfsmethoden
+    # Helper methods
     # -------------------------------------------------------------------
-    @classmethod
-    def roi_label_for_id(cls, roi_id) -> str:
-        try:
-            roi_id = int(roi_id)
-        except Exception:
-            return "unknown"
-        return cls.ROI_LABELS_BY_ID.get(roi_id, "unknown")
 
 
     @classmethod
     def _norm_organ_for_category(cls, name: str) -> str:
+        """Normalise an organ name (lower case, "_" -> space) and resolve aliases."""
         n = str(name or "").strip().lower().replace("_", " ")
         return cls.ORGAN_NAME_ALIASES.get(n, n)
 
     @classmethod
     def category_key_for_pair(cls, label_a, label_b) -> str | None:
         """
-        Matcht ein Organ-Paar (beliebige Reihenfolge, mit Aliasing) auf den
-        passenden Kategorie-Slug aus ORGAN_PAIR_CATEGORIES, z. B. 'liver_spleen'.
-        Gibt None zurück, wenn kein Paar passt.
+        Match an organ pair (any order, with aliasing) to the corresponding
+        category slug from ORGAN_PAIR_CATEGORIES, e.g. 'liver_spleen'.
+        Returns None if no category matches.
         """
         pair = {cls._norm_organ_for_category(label_a),
                 cls._norm_organ_for_category(label_b)}
@@ -249,17 +182,18 @@ class Config:
 
     @classmethod
     def category_label(cls, slug: str | None) -> str | None:
+        """Return the display label of a category slug (None if unknown)."""
         entry = cls.ORGAN_PAIR_CATEGORIES.get(slug) if slug else None
         return entry[2] if entry else None
 
     @classmethod
     def register_organ_pair_category(cls, sig_organ: str, bg_organ: str) -> str:
         """
-        Registriert ein Organ-Paar dynamisch als eigene Kategorie, falls es noch
-        keiner der bekannten Kategorien in ORGAN_PAIR_CATEGORIES entspricht.
-        Dadurch tauchen auch frei im Terminal eingegebene Organ-Paare
-        (z. B. 'aorta,autochthonous_muscle') automatisch in allen Plots auf.
-        Gibt den (neuen oder bestehenden) Kategorie-Slug zurück.
+        Register an organ pair dynamically as a new category if it does not
+        match any of the known categories in ORGAN_PAIR_CATEGORIES.
+        This way, organ pairs typed in freely at the terminal
+        (e.g. 'aorta,autochthonous_muscle') automatically appear in all plots.
+        Returns the (new or existing) category slug.
         """
         existing = cls.category_key_for_pair(sig_organ, bg_organ)
         if existing:
@@ -276,8 +210,3 @@ class Config:
         cls.ORGAN_PAIR_CATEGORIES[slug] = (sig_organ, bg_organ, label)
         cls.CNR_PLOT_CATEGORY_LABELS = [v[2] for v in cls.ORGAN_PAIR_CATEGORIES.values()]
         return slug
-
-
-# ===========================================================================
-# CacheManager
-# ===========================================================================

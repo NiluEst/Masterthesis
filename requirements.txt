@@ -1,0 +1,13 @@
+# Python >= 3.10 (developed with Python 3.14)
+numpy
+scipy
+matplotlib
+pydicom
+pylibjpeg              # decoding of JPEG-compressed DICOM files (if your exports are compressed)
+pylibjpeg-libjpeg
+scikit-image
+SimpleITK
+nibabel
+torch                  # used by TotalSegmentator (GPU optional, CPU works but is slow)
+TotalSegmentator       # organ segmentation of the paediatric phantom
+tqdm                   # progress bar in organize_dicom_files.py

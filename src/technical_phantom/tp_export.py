@@ -1,4 +1,16 @@
-"""CSV-Exporte."""
+"""CSV exports of the technical-phantom pipeline.
+
+Called at the end of a batch run (``tp_compute``). All files are written to
+``DATA_DIR/technical_phantom/csv``; file names carry a short SHA-1 hash of the
+exported content, so identical runs produce identical file names:
+
+* ``kernel_ir_details_<hash>.csv`` - kernel, scanner and iterative-reconstruction
+  tags for every DICOM file of every dataset;
+* ``qa_results_<hash>.csv`` - one row per dataset with CTDIvol, NPS (Υ),
+  MTF50/MTF10, CNR, d', TTF50, HU accuracy and uniformity incl. PASS/FAIL;
+* ``edge_diagnostics_<hash>.csv`` - quality diagnostics of the circular-edge
+  TTF analysis (raw values and aggregated over dose levels).
+"""
 import os
 import json
 import csv
@@ -9,16 +21,15 @@ from tp_config import DATA_DIR, HU_ACCURACY_LIMITS, UNIFORMITY_TOLERANCE_PCT
 
 
 def _csv_output_path(filename):
+    """Return the full path of ``filename`` in the CSV output folder (created if necessary)."""
     out = os.path.join(DATA_DIR, "technical_phantom", "csv")
     os.makedirs(out, exist_ok=True)
     return os.path.join(out, filename)
 
 def _read_ir_qir_tags(dcm):
-    """Liest die privaten Tags (0029,101A) [IR verwendet ja/nein] und
-    (0029,1011) [QIR-Stufe] aus einem pydicom-Dataset. Gibt (ir_used, qir_level)
-    als Strings zurück (leer, falls Tag nicht vorhanden)."""
-
-
+    """Read the private tags (0029,101A) [IR used yes/no] and (0029,1011)
+    [QIR level] from a pydicom dataset. Returns (ir_used, qir_level) as
+    strings (empty if the tag is not present)."""
     ir_used, qir_level = "", ""
     try:
         elem = dcm.get((0x0029, 0x101A))
@@ -37,8 +48,12 @@ def _read_ir_qir_tags(dcm):
 
 
 def _export_kernel_ir_details_to_csv(dataset_list, filename=None):
-    """Exportiert pro Dateipfad (jede DICOM-Datei jedes Batch-Datensatzes):
-    Kernel, Scanner(-Typ/-Modell), IR-Flag (0029,101A) und QIR-Stufe (0029,1011)."""
+    """Export one row per file path (every DICOM file of every batch dataset):
+    kernel, scanner (type/model), IR flag (0029,101A) and QIR level (0029,1011).
+
+    ``dataset_list`` contains dicts with ``folder`` and optionally ``label``.
+    Returns the CSV path, or None if nothing was exported or writing failed.
+    """
     rows = []
     for ds_info in dataset_list:
         folder = ds_info["folder"]
@@ -47,14 +62,14 @@ def _export_kernel_ir_details_to_csv(dataset_list, filename=None):
             fnames = sorted(f for f in os.listdir(folder)
                              if os.path.isfile(os.path.join(folder, f)))
         except Exception as ex:
-            print(f"  Warnung: Ordner {folder} nicht lesbar ({ex})")
+            print(f"  Warning: folder {folder} not readable ({ex})")
             continue
         for fname in fnames:
             fpath = os.path.join(folder, fname)
             try:
                 dcm = pydicom.dcmread(fpath, stop_before_pixels=True)
             except Exception as ex:
-                print(f"  Warnung: konnte {fpath} nicht lesen ({ex})")
+                print(f"  Warning: could not read {fpath} ({ex})")
                 continue
             model = str(getattr(dcm, "ManufacturerModelName", "")).lower()
             if "alpha" in model:
@@ -73,7 +88,7 @@ def _export_kernel_ir_details_to_csv(dataset_list, filename=None):
             })
 
     if not rows:
-        print("Keine Dateien für Kernel/IR-Export gefunden.")
+        print("No files found for kernel/IR export.")
         return None
 
     if filename is None:
@@ -88,14 +103,25 @@ def _export_kernel_ir_details_to_csv(dataset_list, filename=None):
             for r in rows:
                 writer.writerow([r["dataset"], r["path"], r["kernel"], r["scanner_type"],
                                   r["scanner_model"], r["ir_used"], r["qir_level"]])
-        print(f"Kernel/IR-Detail-CSV exportiert nach: {csv_path} ({len(rows)} Dateien)")
+        print(f"Kernel/IR detail CSV exported to: {csv_path} ({len(rows)} files)")
         return csv_path
     except Exception as ex:
-        print(f"Fehler beim Kernel/IR-CSV-Export: {ex}")
+        print(f"Error during kernel/IR CSV export: {ex}")
         return None
 
 
 def _export_batch_results_to_csv(batch_data):
+    """Export the QA results of a batch run, one row per dataset.
+
+    ``batch_data`` is a list of dicts (keys ``dataset``, ``path``,
+    ``scanner_type``, ``ctdivol``, ``nps``, ``mtf50``, ``mtf10`` and the per-material
+    dicts ``cnr``, ``dprime``, ``ttf50``, ``ct_numbers``, plus ``uniformity``
+    and ``uniformity_center_hu``). Columns for materials/positions are the union
+    over all datasets; missing values are left empty.
+    HU accuracy is PASS if lower <= HU <= upper of ``HU_ACCURACY_LIMITS``
+    (deviation = HU - baseline); uniformity is PASS if |U_i| <=
+    ``UNIFORMITY_TOLERANCE_PCT``. Returns the CSV path or None on error.
+    """
     all_cnr_materials = sorted({m for e in batch_data for m in (e.get("cnr") or {}).keys()})
     all_dprime_materials = sorted({m for e in batch_data for m in (e.get("dprime") or {}).keys()})
     all_hu_materials = sorted({m for e in batch_data for m in (e.get("ct_numbers") or {}).keys()})
@@ -111,10 +137,10 @@ def _export_batch_results_to_csv(batch_data):
             header += [f"CNR_{m}" for m in all_cnr_materials]
             header += [f"dprime_{m}" for m in all_dprime_materials]
             header += [f"TTF50_{m} (lp/mm)" for m in all_dprime_materials]
-            # HU Accuracy: gemessener Wert, Abweichung zur Baseline, Pass/Fail
+            # HU accuracy: measured value, deviation from baseline, pass/fail
             for m in all_hu_materials:
                 header += [f"HU_{m}", f"HU_{m}_deviation", f"HU_{m}_pass"]
-            # Uniformity: U_i pro Position, Center-HU, Pass/Fail
+            # Uniformity: U_i per position, centre HU, pass/fail
             for p in all_u_positions:
                 header += [f"Uniformity_{p} (%)", f"Uniformity_{p}_pass"]
             if all_u_positions:
@@ -177,17 +203,23 @@ def _export_batch_results_to_csv(batch_data):
                     row.append("PASS" if (all_pass and u) else ("FAIL" if u else ""))
 
                 writer.writerow(row)
-        print(f"CSV exportiert nach: {csv_path}")
+        print(f"CSV exported to: {csv_path}")
         return csv_path
     except Exception as ex:
-        print(f"Fehler beim CSV-Export: {ex}")
+        print(f"Error during CSV export: {ex}")
         return None
 
 def _export_edge_diagnostics_to_csv(batch_data):
     """
-    Exportiert edge_bias/edge_std/ambiguous/rejected pro Datensatz + Material
-    (eine Zeile je Dosisstufe x Material), UND eine zweite, über die Dosisstufen
-    gemittelte Zusammenfassung pro Material x Scanner-Typ (Tab. für die MA).
+    Export edge_bias/edge_std/ambiguous/rejected per dataset + material
+    (one row per dose level x material), AND a second summary averaged over the
+    dose levels per material x scanner type (table for the master's thesis).
+
+    ``batch_data`` entries need ``dataset``, ``scanner_type``, ``ctdivol`` and
+    ``edge_diag`` ({material: diagnostics dict from
+    ``PhantomAnalysis.compute_ttf_circular_edge``}). Fractions are written in
+    percent; the summary gives mean/SD of bias and edge SD (mm) and
+    mean/min/max of the ambiguous fraction (%). Returns the CSV path or None.
     """
     all_materials = sorted({m for e in batch_data for m in (e.get("edge_diag") or {}).keys()})
     payload = json.dumps(batch_data, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
@@ -197,8 +229,8 @@ def _export_edge_diagnostics_to_csv(batch_data):
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
 
-            # ── Teil 1: Rohdaten, eine Zeile je Datensatz x Material ──
-            writer.writerow(["── Rohdaten pro Dosisstufe ──"])
+            # ── Part 1: raw data, one row per dataset x material ──
+            writer.writerow(["── Raw data per dose level ──"])
             writer.writerow(["Dataset", "Scanner_Type", "CTDIvol (mGy)", "Material",
                               "edge_bias_mm", "edge_std_mm",
                               "ambiguous_fraction_pct", "rejected_fraction_pct"])
@@ -218,10 +250,10 @@ def _export_edge_diagnostics_to_csv(batch_data):
                         f"{d['rejected_fraction']*100:.1f}" if d.get("rejected_fraction") is not None else "",
                     ])
 
-            # ── Teil 2: Aggregation über Dosisstufen, pro Material x Scanner ──
+            # ── Part 2: aggregation over dose levels, per material x scanner ──
             writer.writerow([])
-            writer.writerow(["── Aggregiert über Dosisstufen (Mittelwert ± SD) ──"])
-            writer.writerow(["Material", "Scanner_Type", "n_Dosisstufen",
+            writer.writerow(["── Aggregated over dose levels (mean ± SD) ──"])
+            writer.writerow(["Material", "Scanner_Type", "n_dose_levels",
                               "edge_bias_mean_mm", "edge_bias_sd_mm",
                               "edge_std_mean_mm", "edge_std_sd_mm",
                               "ambiguous_mean_pct", "ambiguous_min_pct", "ambiguous_max_pct"])
@@ -251,8 +283,8 @@ def _export_edge_diagnostics_to_csv(batch_data):
                         f"{np.mean(amb_vals):.1f}", f"{min(amb_vals):.1f}", f"{max(amb_vals):.1f}",
                     ])
 
-        print(f"Edge-Diagnostik CSV exportiert nach: {csv_path}")
+        print(f"Edge diagnostics CSV exported to: {csv_path}")
         return csv_path
     except Exception as ex:
-        print(f"Fehler beim Edge-Diagnostik-CSV-Export: {ex}")
+        print(f"Error during edge diagnostics CSV export: {ex}")
         return None

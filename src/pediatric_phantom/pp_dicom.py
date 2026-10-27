@@ -1,5 +1,16 @@
 """
-Pediatric Phantom – DICOM, Cache, FOV-Klassifikation (unveränderte Metrik-Logik).
+Pediatric Phantom – DICOM helpers, result cache and FOV classification.
+
+Contents:
+  CacheManager  – JSON result cache and TotalSegmentator cache folders, keyed
+                  by a dataset signature (preferably the SeriesInstanceUID).
+  DicomUtils    – reads DICOM header values (CTDIvol, kernel, scanner model,
+                  kVp, slice thickness, FOV) and rejects folders that are not a
+                  volumetric axial CT reconstruction (topograms, dose reports, …).
+  FovClassifier – labels datasets as 'same_fov' / 'different_fov' from the
+                  Reconstruction Diameter in the header.
+
+Used by pp_compute.py (and pp_segment.py for the segmentation cache folders).
 """
 from __future__ import annotations
 import os
@@ -16,28 +27,23 @@ from pp_config import Config
 
 class CacheManager:
     """
-    Verwaltet den JSON-Cache für ROI-Positionen, CNR-Paare und Ergebnisse.
-    Jeder Datensatz wird über eine Signatur identifiziert.
-    Bevorzugt wird die SeriesInstanceUID aus dem DICOM-Header (Präfix "uid:"),
-    die pfadunabhängig ist und auch nach dem Verschieben von Dateien greift.
-    Fallback: Pfad + Dateianzahl (bisheriges Verhalten).
+    Manages the JSON cache (output_data/roi_selection_cache.json) that stores
+    the organ pairs, segmentation path and CNR/SNR results per dataset.
+    Each dataset is identified by a signature.
+    The SeriesInstanceUID from the DICOM header is preferred (prefix "uid:"),
+    because it is independent of the file path and still matches after the
+    files have been moved.
+    Fallback: path + number of files (legacy behaviour).
     """
     @staticmethod
     def _output_data_root() -> Path:
-        # .../src/pediatric_phantom/pp_dicom.py -> parent(pediatric_phantom) -> parent(src) -> parent(Repo) -> output_data
+        # .../src/pediatric_phantom/pp_dicom.py -> parent(pediatric_phantom) -> parent(src) -> parent(repo) -> output_data
         return Path(__file__).resolve().parent.parent.parent / "output_data"
 
     @staticmethod
     def _cache_path() -> str:
         return str(CacheManager._output_data_root() / "roi_selection_cache.json")
 
-    @staticmethod
-    def _reference_cache_root() -> Path:
-        return CacheManager._output_data_root() / "TotalSegmentator" / "reference_cache"
-
-    @staticmethod
-    def _registration_cache_root() -> Path:
-        return CacheManager._output_data_root() / "TotalSegmentator" / "registration_cache"
 
     @staticmethod
     def _segmentation_cache_root() -> Path:
@@ -46,14 +52,16 @@ class CacheManager:
     @classmethod
     def segmentation_dir_for_signature(cls, signature: str) -> Path:
         """
-        Gibt den Cache-Ordner für eine TotalSegmentator-Segmentierung zurück.
-        Eindeutig pro SeriesInstanceUID-Signatur — pfadunabhängig.
+        Return the cache folder for a TotalSegmentator segmentation.
+        Unique per dataset signature (SeriesInstanceUID) — independent of the path.
+        The folder name is a short SHA-1 hash of the signature (see cache_token).
         """
         token = cls.cache_token(signature)
         return cls._segmentation_cache_root() / token
 
     @classmethod
     def read(cls) -> dict:
+        """Load the whole JSON cache; returns {} if the file is missing or unreadable."""
         path = cls._cache_path()
         if not os.path.exists(path):
             return {}
@@ -68,12 +76,13 @@ class CacheManager:
 
     @classmethod
     def write(cls, cache: dict) -> None:
+        """Overwrite the JSON cache file with ``cache``."""
         with open(cls._cache_path(), "w", encoding="utf-8") as fh:
             json.dump(cache, fh, indent=2)
 
     @classmethod
     def _read_series_instance_uid(cls, dicom_folder: str) -> str | None:
-        """Liest die SeriesInstanceUID aus der ersten gültigen DICOM-Datei im Ordner."""
+        """Read the SeriesInstanceUID from the first valid DICOM file in the folder."""
         abs_folder = os.path.abspath(str(dicom_folder))
         try:
             for fname in sorted(os.listdir(abs_folder)):
@@ -81,6 +90,7 @@ class CacheManager:
                 if not os.path.isfile(fpath):
                     continue
                 try:
+                    # Windows extended-length path prefix (paths longer than 260 characters)
                     extended = r"\\?\\" + fpath
                     ds = pydicom.dcmread(extended, stop_before_pixels=True, force=False)
                     uid = getattr(ds, "SeriesInstanceUID", None)
@@ -95,15 +105,15 @@ class CacheManager:
     @classmethod
     def dataset_signature(cls, dicom_folder) -> str:
         """
-        Gibt eine eindeutige Signatur für den Datensatz zurück.
-        Bevorzugt die SeriesInstanceUID (pfadunabhängig), fällt auf
-        den ursprünglichen Pfad-basierten Key zurück wenn keine UID
-        gefunden wird.
+        Return a unique signature for the dataset.
+        Prefers the SeriesInstanceUID ("uid:<UID>", independent of the path)
+        and falls back to the original path-based key
+        ("<path>|n=<count>|first=<file>|last=<file>") if no UID is found.
         """
         uid = cls._read_series_instance_uid(str(dicom_folder))
         if uid:
             return f"uid:{uid}"
-        # Fallback: Pfad + Dateianzahl (bisheriges Verhalten)
+        # Fallback: path + number of files (legacy behaviour)
         abs_folder = os.path.abspath(str(dicom_folder))
         try:
             file_names = sorted(
@@ -119,35 +129,14 @@ class CacheManager:
 
     @classmethod
     def cache_token(cls, text: str) -> str:
+        """Short, file-name-safe token: first 12 hex digits of the SHA-1 hash of ``text``."""
         return hashlib.sha1(str(text).encode("utf-8")).hexdigest()[:12]
 
     @classmethod
     def save_entry(cls, signature: str, entry: dict) -> None:
+        """Store (replace) the cache entry of one dataset and write the cache file."""
         cache = cls.read()
         cache[signature] = entry
-        cls.write(cache)
-
-    @classmethod
-    def has_rois(cls, dicom_path: str) -> bool:
-        sig = cls.dataset_signature(dicom_path)
-        entry = cls.read().get(sig, {})
-        return len(entry.get("rois", [])) > 0
-
-    @classmethod
-    def get_cnr_pairs(cls, dicom_path: str):
-        sig = cls.dataset_signature(dicom_path)
-        entry = cls.read().get(sig, {})
-        return entry.get("cnr_pairs", None)
-
-    @classmethod
-    def append_comparison_run(cls, signature_list: list) -> None:
-        if len(signature_list) < 2:
-            return
-        cache = cls.read()
-        runs = cache.get("comparison_runs") if isinstance(cache.get("comparison_runs"), list) else []
-        runs.append({"created_at": datetime.now().isoformat(timespec="seconds"),
-                     "dataset_signatures": list(signature_list)})
-        cache["comparison_runs"] = runs
         cls.write(cache)
 
 
@@ -156,15 +145,16 @@ class CacheManager:
 # ===========================================================================
 
 
-
 class DicomUtils:
     """
-    DICOM-Hilfsfunktionen: erste DICOM-Datei finden, Metadaten auslesen.
+    DICOM helper functions: find the first DICOM file, read metadata.
+    All readers use the header of the first CT file in the folder and return
+    "N/A" (strings) or None (numbers) if the value is not available.
     """
 
     @staticmethod
     def find_first_ct_file(folder: str):
-        """Gibt (ds, path) des ersten gültigen CT-DICOM-Files zurück."""
+        """Return (ds, path) of the first valid CT DICOM file (header only); (None, None) if none."""
         for root, _, files in os.walk(folder):
             for fname in files:
                 path = os.path.join(root, fname)
@@ -179,6 +169,7 @@ class DicomUtils:
 
     @classmethod
     def read_ctdivol(cls, folder: str) -> str:
+        """Return CTDIvol (mGy) as a string, or "N/A"."""
         ds, _ = cls.find_first_ct_file(folder)
         if ds is None:
             return "N/A"
@@ -187,7 +178,11 @@ class DicomUtils:
 
     @classmethod
     def read_ct_parameters(cls, folder: str) -> tuple[str, str, str]:
-        """Gibt (kernel, manufacturer, kvp) zurück."""
+        """
+        Return (kernel, manufacturer, kvp) as strings ("N/A" if missing).
+        ``manufacturer`` is the ManufacturerModelName (e.g. "NAEOTOM alpha");
+        multi-valued ConvolutionKernel entries are joined with ", ".
+        """
         ds, _ = cls.find_first_ct_file(folder)
         if ds is None:
             return "N/A", "N/A", "N/A"
@@ -208,6 +203,7 @@ class DicomUtils:
 
     @classmethod
     def read_slice_thickness(cls, folder: str):
+        """Return SliceThickness in mm as float, or None."""
         ds, _ = cls.find_first_ct_file(folder)
         if ds is None:
             return None
@@ -220,11 +216,11 @@ class DicomUtils:
     @classmethod
     def read_reconstruction_diameter(cls, folder: str) -> float | None:
         """
-        Liest (0018,1100) Reconstruction Diameter (= FOV) in mm aus der
-        ersten gültigen CT-DICOM-Datei im Ordner.
+        Read (0018,1100) Reconstruction Diameter (= FOV) in mm from the
+        first valid CT DICOM file in the folder.
 
-        Fallback, falls das Tag fehlt: FOV wird aus PixelSpacing * Rows
-        rekonstruiert (das entspricht in der Regel demselben Wert).
+        Fallback if the tag is missing: the FOV is computed as
+        PixelSpacing * Rows (which usually gives the same value).
         """
         ds, _ = cls.find_first_ct_file(folder)
         if ds is None:
@@ -244,9 +240,11 @@ class DicomUtils:
             pass
         return None
 
-    # Begriffe, die auf NICHT-volumetrische / nicht segmentierbare Serien
-    # hindeuten (Topogramme/Scouts, Dosis-Reports, Patient-Protocols,
-    # Secondary Captures, Structured Reports, ...).
+    # Terms (searched for in the lower-case SeriesDescription) that indicate
+    # NON-volumetric / non-segmentable series (topograms/scouts, dose reports,
+    # patient protocols, secondary captures, structured reports, ...).
+    # German terms ("dosisreport", "patientenprotokoll", ...) are kept on
+    # purpose because they occur in German-language scanner series descriptions.
     NON_RECON_KEYWORDS = (
         "topogram", "topo", "scout", "surview", "localizer",
         "dose report", "dosisreport", "dose_report", "dosis report",
@@ -254,12 +252,12 @@ class DicomUtils:
         "secondary capture", "screen save", "screenshot",
         "structured report", "dose info", "doseinfo", "patient_protocol",
     )
-    # Modalitäten, die sicher KEIN axiales CT-Volumen sind.
+    # Modalities that are certainly NOT an axial CT volume.
     NON_RECON_MODALITIES = {"SR", "OT", "PR", "KO", "DOC"}
 
     @staticmethod
     def _find_first_any_file(folder: str):
-        """Erste lesbare DICOM-Datei, unabhängig von der Modality."""
+        """First readable DICOM file, regardless of its Modality."""
         for root, _, files in os.walk(folder):
             for fname in files:
                 path = os.path.join(root, fname)
@@ -274,31 +272,36 @@ class DicomUtils:
     @classmethod
     def is_valid_ct_recon(cls, folder: str, min_slices: int = 10) -> tuple[bool, str]:
         """
-        Prüft VOR dem Laden/Segmentieren/Registrieren, ob ein Ordner ein
-        plausibles volumetrisches axiales CT-Rekon enthält. Schließt
-        Topogramme, Dose Reports, Patient Protocols, Secondary Captures,
-        Structured Reports und Ordner mit zu wenigen Slices aus (SimpleITK
-        braucht für die Registrierung mind. 4 Slices je Dimension).
+        Check BEFORE loading/segmenting whether a folder contains a
+        plausible volumetric axial CT reconstruction. Excludes topograms,
+        dose reports, patient protocols, secondary captures, structured
+        reports and folders with too few slices (fewer than ``min_slices``
+        files; the original motivation was that SimpleITK registration
+        needs at least 4 slices per dimension).
 
-        Returns (is_valid, reason).
+        Checks, in this order: number of files, Modality, ImageType
+        keywords, SeriesDescription keywords (NON_RECON_KEYWORDS).
+
+        Returns (is_valid, reason); ``reason`` is "" for a valid folder and is
+        only used for console output.
         """
         try:
             files = [f for f in os.listdir(folder)
                      if os.path.isfile(os.path.join(folder, f))]
         except OSError as exc:
-            return False, f"Ordner nicht lesbar ({exc})"
+            return False, f"Folder not readable ({exc})"
 
         if len(files) < min_slices:
-            return False, (f"Zu wenige Dateien ({len(files)} < {min_slices}) — "
-                           f"vermutlich Topogram/Scout/Einzelbild/Report")
+            return False, (f"Too few files ({len(files)} < {min_slices}) — "
+                           f"probably topogram/scout/single image/report")
 
         ds, _ = cls._find_first_any_file(folder)
         if ds is None:
-            return False, "Keine lesbare DICOM-Datei gefunden"
+            return False, "No readable DICOM file found"
 
         modality = str(getattr(ds, "Modality", "") or "").strip().upper()
         if modality in cls.NON_RECON_MODALITIES:
-            return False, f"Modality '{modality}' ist kein CT-Bildvolumen"
+            return False, f"Modality '{modality}' is not a CT image volume"
         if modality != "CT":
             return False, f"Modality '{modality}' != CT"
 
@@ -309,17 +312,18 @@ class DicomUtils:
                       else str(image_type)).lower()
             for kw in ("localizer", "scout", "screen save"):
                 if kw in it_str:
-                    return False, f"ImageType enthält Ausschlussbegriff ('{it_str}')"
+                    return False, f"ImageType contains an exclusion term ('{it_str}')"
 
         series_desc = str(getattr(ds, "SeriesDescription", "") or "").lower()
         for kw in cls.NON_RECON_KEYWORDS:
             if kw in series_desc:
-                return False, f"SeriesDescription enthält Ausschlussbegriff ('{series_desc}')"
+                return False, f"SeriesDescription contains an exclusion term ('{series_desc}')"
 
         return True, ""
-    
+
     @classmethod
     def read_study_description(cls, folder: str) -> str:
+        """Return the StudyDescription (stripped), or "" if not available."""
         ds, _ = cls.find_first_ct_file(folder)
         if ds is None:
             return ""
@@ -331,35 +335,37 @@ class DicomUtils:
 # ===========================================================================
 
 
-
 class FovClassifier:
     """
-    Klassifiziert Datensätze anhand des DICOM-Headers als 'same_fov' oder
-    'different_fov' — OHNE dass Ordnerpfad oder UIDs herangezogen werden
-    müssen (beide Kampagnen liegen im selben Root-Ordner vermischt und
-    tragen dieselbe StudyInstanceUID).
+    Classifies datasets as 'same_fov' or 'different_fov' from the DICOM
+    header — WITHOUT using the folder path or UIDs (both acquisition
+    campaigns are mixed in the same root folder and share the same
+    StudyInstanceUID).
 
-    Idee:
-      Die 'same_fov'-Kampagne wurde per "Copy all reconstruction volume"
-      erzeugt, d. h. die Reconstruction Diameter (0018,1100 = FOV) ist über
-      ALLE CTDIvol-Stufen dieser Kampagne identisch — dieser FOV-Wert
-      wiederholt sich also im gesamten Datensatz sehr häufig.
-      Die 'different_fov'-Kampagne hat pro CTDIvol-Stufe eine leicht
-      andere FOV, die im gesamten Datensatz meist nur einmal auftritt.
+    Idea:
+      The 'same_fov' campaign was created with "Copy all reconstruction
+      volume", i.e. the Reconstruction Diameter (0018,1100 = FOV) is identical
+      across ALL CTDIvol levels of this campaign — so this FOV value occurs
+      very often in the whole dataset.
+      The 'different_fov' campaign has a slightly different FOV for each
+      CTDIvol level, which usually occurs only once in the whole dataset.
 
-      Algorithmus: alle FOV-Werte über den gesamten Datensatz transitiv
-      clustern (Toleranz: Config.FOV_CLUSTER_TOLERANCE_MM). Der GRÖSSTE
-      Cluster (meiste Datensätze) wird als 'same_fov' gewertet, alle
-      übrigen Werte als 'different_fov'.
+      Algorithm: cluster all FOV values of the whole dataset transitively
+      (tolerance: Config.FOV_CLUSTER_TOLERANCE_MM). The LARGEST cluster
+      (most datasets) is labelled 'same_fov', all other values 'different_fov'.
 
-    WICHTIG: Diese Heuristik ist ein Muster-Erkennungsverfahren, keine
-    exakte Header-Auswertung. Die Konsolen-Ausgabe von classify() sollte
-    einmal kontrolliert werden (Anzahl Mitglieder pro Cluster sollte mit
-    der Anzahl CTDIvol-Stufen der jeweiligen Kampagne übereinstimmen).
+    IMPORTANT: this heuristic is a pattern-recognition approach, not an
+    exact header evaluation. The console output of classify() should be
+    checked once (the number of members per cluster should match the
+    number of CTDIvol levels of the respective campaign).
     """
 
     @staticmethod
     def _cluster_values(values: list[float], tol: float) -> list[list[float]]:
+        """
+        Transitive 1-D clustering: sorted unique values are put into the same
+        cluster as long as the gap to the previous value is <= ``tol``.
+        """
         uniq = sorted(set(values))
         if not uniq:
             return []
@@ -374,9 +380,9 @@ class FovClassifier:
     @classmethod
     def classify(cls, dataset_results: list) -> None:
         """
-        Liest für jeden Datensatz die Reconstruction Diameter (FOV) aus
-        dem DICOM-Header, clustert alle Werte über den Datensatz hinweg
-        und markiert jeden Eintrag in-place mit:
+        Read the Reconstruction Diameter (FOV) from the DICOM header of every
+        dataset, cluster all values across the datasets and tag every
+        entry in place with:
           ds["reconstruction_diameter_mm"]
           ds["fov_group"]  -> "same_fov" | "different_fov" | "unknown_fov"
         """
@@ -388,8 +394,8 @@ class FovClassifier:
                        if ds["reconstruction_diameter_mm"] is not None]
 
         if not diam_values:
-            print("\n  [Warnung] Keine FOV-Werte (Reconstruction Diameter) im Header "
-                  "gefunden — FOV-Klassifikation nicht möglich.")
+            print("\n  [Warning] No FOV values (Reconstruction Diameter) found in the "
+                  "header — FOV classification not possible.")
             for ds in dataset_results:
                 ds["fov_group"] = "unknown_fov"
             return
@@ -403,6 +409,7 @@ class FovClassifier:
                     return tuple(c)
             return tuple()
 
+        # Number of datasets per cluster; the most frequent cluster is 'same_fov'
         counts: dict[tuple, int] = {}
         for v in diam_values:
             c = _cluster_of(v)
@@ -411,13 +418,13 @@ class FovClassifier:
         same_fov_cluster = max(counts, key=counts.get)
         same_fov_range = (min(same_fov_cluster) - tol, max(same_fov_cluster) + tol)
 
-        print("\n--- FOV-Klassifikation (Muster-basiert, ohne Pfad/UID) ---")
-        print("  Gefundene FOV-Cluster (Wertebereich -> Anzahl Datensätze):")
+        print("\n--- FOV classification (pattern-based, without path/UID) ---")
+        print("  FOV clusters found (value range -> number of datasets):")
         for c, n in sorted(counts.items(), key=lambda x: -x[1]):
-            print(f"    {min(c):.1f}–{max(c):.1f} mm  →  {n} Datensätze")
-        print(f"  → größter Cluster = 'same_fov': "
+            print(f"    {min(c):.1f}–{max(c):.1f} mm  →  {n} datasets")
+        print(f"  → largest cluster = 'same_fov': "
               f"{same_fov_range[0]:.1f}–{same_fov_range[1]:.1f} mm "
-              f"({counts[same_fov_cluster]} Datensätze)\n")
+              f"({counts[same_fov_cluster]} datasets)\n")
 
         for ds in dataset_results:
             v = ds["reconstruction_diameter_mm"]
@@ -434,11 +441,5 @@ class FovClassifier:
 
         n_unknown = sum(1 for ds in dataset_results if ds.get("fov_group") == "unknown_fov")
         if n_unknown:
-            print(f"  [Hinweis] {n_unknown} Datensatz/Datensätze ohne lesbaren FOV-Wert "
+            print(f"  [Note] {n_unknown} dataset(s) without a readable FOV value "
                   f"('unknown_fov').")
-
-
-# ===========================================================================
-# RoiGeometry
-# ===========================================================================
-

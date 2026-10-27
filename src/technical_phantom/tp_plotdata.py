@@ -1,5 +1,14 @@
-"""Aufbereitung der Ergebnisse zu plotfertigen Daten (Dosis-Gruppierung, ΔMTF, ΥNPS je Kernel).
-Logik 1:1 aus den alten Plotter-Funktionen übernommen – hier wird nur gerechnet, nicht gezeichnet."""
+"""Prepare analysis results as plot-ready data (dose grouping, ΔMTF, ΥNPS per kernel).
+
+Called by tp_compute.py (QAPipeline) after the per-dataset analysis. The returned dicts are
+stored in the results .pkl and drawn by tp_plots.py – this module only computes, it does not
+plot. The logic was taken over 1:1 from the former plotting functions.
+
+`results` arguments are lists of per-dataset result dicts as returned by `QAPipeline.run`
+(keys such as "ctdivol_mgy", "scanner_type", "cnr_by_material", "ct_numbers", "upsilon_nps").
+Datasets are grouped by CTDIvol (mGy) with tolerance `DOSE_TOLERANCE_MGY`, and the values are
+averaged separately for the scanner types "PCCT" and "EID".
+"""
 import re
 import numpy as np
 
@@ -8,7 +17,12 @@ from tp_helpers import _cluster_by_tolerance, _kernel_group
 
 
 def dose_groups(entries, tol=DOSE_TOLERANCE_MGY):
-    """entries: [(ctdivol, scanner_type, value)] -> {"doses", "PCCT", "EID"} (Mittelwert je Dosis-Cluster)."""
+    """Group values by dose and average them per scanner type.
+
+    entries: [(ctdivol, scanner_type, value)] -> {"doses", "PCCT", "EID"}.
+    "doses" holds the mean CTDIvol of each dose cluster (sorted); "PCCT"/"EID" hold the mean value
+    of that scanner type in each cluster (NaN if the type has no entry in a cluster).
+    """
     clusters = _cluster_by_tolerance([e[0] for e in entries], tol)
     groups = {}
     for cluster in clusters:
@@ -27,6 +41,10 @@ def dose_groups(entries, tol=DOSE_TOLERANCE_MGY):
 
 
 def cnr_dose(results, material_subset=None, tol=DOSE_TOLERANCE_MGY):
+    """CNR vs. dose: per dataset the CNR averaged over all (or `material_subset`) materials.
+
+    Returns the `dose_groups` dict, or None if no CNR data is available.
+    """
     entries = []
     for r in results:
         if not r.get("cnr_by_material") or r.get("ctdivol_mgy") is None:
@@ -36,12 +54,13 @@ def cnr_dose(results, material_subset=None, tol=DOSE_TOLERANCE_MGY):
         if vals:
             entries.append((float(r["ctdivol_mgy"]), r["scanner_type"], float(np.mean(vals))))
     if not entries:
-        print("Keine CNR-Daten für Dosis-Plot.")
+        print("No CNR data for dose plot.")
         return None
     return dose_groups(entries, tol)
 
 
 def hu_dose(results, tol=DOSE_TOLERANCE_MGY):
+    """Measured CT number (HU) vs. dose per insert material -> {material: dose_groups dict}."""
     out = {}
     for n in INSERT_NAMES:
         entries = [(float(r["ctdivol_mgy"]), r["scanner_type"], float(r["ct_numbers"][n]))
@@ -53,6 +72,7 @@ def hu_dose(results, tol=DOSE_TOLERANCE_MGY):
 
 
 def uniformity_dose(results, tol=DOSE_TOLERANCE_MGY):
+    """Uniformity index U_i (%) vs. dose per peripheral position (U12/U3/U6/U9) -> {position: dose_groups dict}."""
     out = {}
     for name in UNIFORMITY_POSITIONS_DEG:
         entries = [(float(r["ctdivol_mgy"]), r["scanner_type"], r["uniformity_by_position"][name])
@@ -65,32 +85,39 @@ def uniformity_dose(results, tol=DOSE_TOLERANCE_MGY):
 
 
 def uniformity_center_hu_dose(results, tol=DOSE_TOLERANCE_MGY):
+    """Mean HU of the central uniformity ROI (CTP486) vs. dose; None if no data."""
     entries = [(float(r["ctdivol_mgy"]), r["scanner_type"], float(r["uniformity_center_hu"]))
                for r in results
                if r.get("uniformity_center_hu") is not None and r.get("ctdivol_mgy") is not None]
     if not entries:
-        print("Keine Uniformity-Center-HU-Daten für Dosis-Plot.")
+        print("No uniformity centre HU data for dose plot.")
         return None
     return dose_groups(entries, tol)
 
 
 def nps_dose(results, tol=DOSE_TOLERANCE_MGY):
+    """ΥNPS (noise magnitude integrated from the radial NPS, see PhantomAnalysis.compute_nps) vs. dose; None if no data."""
     entries = [(float(r["ctdivol_mgy"]), r["scanner_type"], float(r["upsilon_nps"]))
                for r in results
                if r.get("upsilon_nps") is not None and r.get("ctdivol_mgy") is not None]
     if not entries:
-        print("Keine NPS-Daten für Dosis-Plot.")
+        print("No NPS data for dose plot.")
         return None
     return dose_groups(entries, tol)
 
 
 def dprime_dose(mat_results, tol=DOSE_TOLERANCE_MGY):
+    """d' vs. dose for one material; `mat_results` items need "ctdivol_mgy", "scanner_type", "d_prime"."""
     entries = [(float(r["ctdivol_mgy"]), r["scanner_type"], float(r["d_prime"])) for r in mat_results]
     return dose_groups(entries, tol) if entries else None
 
 
 def mtf_delta(c0, c1):
-    """ΔMTF = MTF(c1) − MTF(c0) auf gemeinsamem Frequenzgitter (wie bisher)."""
+    """ΔMTF = MTF(c1) − MTF(c0) on a common frequency grid.
+
+    Both curves are linearly interpolated onto 300 points spanning the overlapping frequency
+    range (lp/mm). Returns {"grid", "delta", "label"}, or None if the ranges do not overlap.
+    """
     fa, fb = np.asarray(c0["fr_lp_mm"]), np.asarray(c1["fr_lp_mm"])
     ma, mb = np.asarray(c0["mtf"]), np.asarray(c1["mtf"])
     cmin, cmax = max(fa.min(), fb.min()), min(fa.max(), fb.max())
@@ -102,7 +129,11 @@ def mtf_delta(c0, c1):
 
 
 def upsilon_per_kernel(results):
-    """Mittleres ΥNPS je Kernel-Gruppe, getrennt nach Scanner-Familie (EID/PCCT)."""
+    """Mean ΥNPS per kernel group, separately for each scanner family (EID/PCCT).
+
+    Kernel groups are sorted by their sharpness number. Returns
+    {"kernels": [...], "series": {"EID": [...], "PCCT": [...]}} (NaN where no data).
+    """
     kernels = sorted({_kernel_group(r["kernel"]) for r in results},
                      key=lambda k: int(re.search(r'\d+', k).group()))
     series = {}
@@ -118,6 +149,6 @@ def upsilon_per_kernel(results):
 
 
 def slim_kernel_results(results):
-    """Nur die Felder, die die Kernel-Plots brauchen (hält die .pkl klein)."""
+    """Keep only the fields needed by the kernel plots (keeps the .pkl small)."""
     keys = ("label", "kernel", "scanner_type", "mtf_fr_lp_mm", "mtf_curve", "nps_freqs", "nps_1d")
     return [{k: r.get(k) for k in keys} for r in results]

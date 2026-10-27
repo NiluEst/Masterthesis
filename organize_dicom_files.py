@@ -1,19 +1,38 @@
 #!/usr/bin/env python3
-"""
-#!Benutzte Version, um DICOMs vom Scanner in Ordner zu packen (getrennt nach Rekon) und als .dcm umzunennen, wenn das nicht der Fall ist
+r"""
+DICOM file organizer - sorts raw scanner DICOM exports into one folder per series.
 
-DICOM File Organizer - Ultra-fast sorting with multiprocessing
-Optimized for maximum performance with batch processing
+Stand-alone helper script (not part of the analysis packages in ``src/``). It was
+used to prepare the raw DICOM exports of the CT scanners before analysis: every
+file below the given folder is read as DICOM (regardless of its extension), moved
+into a folder per series / reconstruction and - unless ``--keep-long-names`` is
+given - renamed to a short name built from series and instance number (e.g.
+``S003_I0001.dcm``). Files without an extension get ``.dcm``. Empty folders
+are removed afterwards.
 
-Aufruf: python organize_dicom_files.py "W:\radiologie\data\Poststelle\nilufar\data\Kinderphantom\Kinderphantom-Nilu\Dosetesting-Fehlerbalkenvergleich\Alpha\Repro Test 14.10 Alpha Kinderphantom\DICOM\26101414\50400000"
+Folder layout:
+- default (hierarchical): base / (existing patient/study folders) / series.
+  If the relative path of a file already contains a folder named after its
+  StudyInstanceUID, the structure up to that folder is kept; otherwise a
+  patient / study / series hierarchy is built from the DICOM header.
+- ``--flat``: all series folders directly below the base folder.
 
+Series folder name: ``<date>_<time>_<SeriesDescription>_<Modality>_S<SeriesNumber>``
+(date/time are omitted if not present in the header).
 
-Version for files without .dcm extension - processes ALL files as DICOM
+Files are processed in parallel with a thread pool. On Windows, extended-length
+path prefixes (\\?\) are used to support long paths.
 
-Neu:
-- Standardmäßig hierarchische Struktur: base / (bestehende Patient-/Study-Ordner) / Series
-- Optional flache Struktur mit --flat (wie vorher "alles unter base_path")
-- Verarbeitet ALLE Dateien als DICOM (nicht nur .dcm)
+Usage:
+    python organize_dicom_files.py "<path\to\DICOM\export>" [--dry-run] [-j N]
+                                   [--keep-long-names] [--flat]
+
+    --dry-run           only show what would be done, without moving files
+    -j, --workers N     number of worker threads (default: 14)
+    --keep-long-names   keep the original file names (default: shorten)
+    --flat              no patient/study/series hierarchy
+
+WARNING: files are MOVED in place (not copied); use --dry-run first.
 """
 
 import os
@@ -27,11 +46,12 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import multiprocessing as mp
 import threading
-from functools import partial
 import time
 
 
 class DicomFileOrganizer:
+    """Moves DICOM files into per-series folders and keeps simple statistics."""
+
     def remove_empty_folders(self, base_path):
         """Recursively remove empty folders in base_path"""
         for folder in sorted(base_path.rglob('*'), key=lambda p: -len(str(p))):
@@ -133,34 +153,35 @@ class DicomFileOrganizer:
 
     def create_hierarchical_folder_from_dicom(self, base_path, ds, file_path):
         """
-        Erzeuge einen hierarchischen Pfad mit möglichst viel
-        bestehender Struktur:
+        Create a hierarchical target path that keeps as much of the
+        existing structure as possible:
 
-        - Falls der relative Pfad (ab base_path) eine Komponente enthält,
-          die der StudyInstanceUID entspricht, dann wird alles bis inkl.
-          dieser Ebene übernommen.
-        - Darunter wird nur noch der neue Serien-Ordner angehängt.
+        - If the relative path (from base_path) contains a component equal
+          to the StudyInstanceUID, everything up to and including that level
+          is kept, and only the new series folder is appended below it.
+        - Otherwise a PatientID / study / series hierarchy is built from
+          the DICOM header.
        """
         series_folder_name = self.create_folder_name_from_dicom(ds)
 
         study_uid = getattr(ds, "StudyInstanceUID", None)
 
-        # Versuche, existierende Struktur zu nutzen
+        # Try to use the existing structure
         try:
             rel_dir = file_path.parent.relative_to(base_path)
-            rel_parts = rel_dir.parts  # Tupel der Ordnernamen ab base_path
+            rel_parts = rel_dir.parts  # tuple of folder names below base_path
         except ValueError:
             rel_parts = None
 
         if rel_parts and study_uid and study_uid in rel_parts:
-            # Alles bis inkl. StudyUID übernehmen
+            # Keep everything up to and including the StudyUID folder
             idx = rel_parts.index(study_uid)
             root = base_path
             for part in rel_parts[:idx + 1]:
                 root = root / part
             return root / series_folder_name
 
-        # Fallback: eigene Patient/Study/Series-Hierarchie aus Header bauen
+        # Fallback: build our own patient/study/series hierarchy from the header
         patient_id = getattr(ds, "PatientID", "UnknownPID")
         patient_folder_name = self.sanitize_windows_filename(str(patient_id), max_length=60)
 
@@ -181,12 +202,15 @@ class DicomFileOrganizer:
         return base_path / patient_folder_name / study_folder_name / series_folder_name
 
     def process_single_dicom_file(self, file_path, base_path, dry_run=False):
-        """Process a single DICOM file - thread-safe"""
+        """Process (move or, in dry-run mode, only report) a single DICOM file - thread-safe.
+
+        Returns ``(status, message)`` with status "success" or "error".
+        """
         try:
             # Read DICOM metadata
             ds = pydicom.dcmread(file_path, stop_before_pixels=True)
 
-            # Zielordner bestimmen: hierarchisch oder flach
+            # Determine the target folder: hierarchical or flat
             if self.hierarchical:
                 target_folder = self.create_hierarchical_folder_from_dicom(base_path, ds, file_path)
                 folder_display_name = str(target_folder.relative_to(base_path))
@@ -195,7 +219,7 @@ class DicomFileOrganizer:
                 target_folder = base_path / folder_name
                 folder_display_name = folder_name
 
-            # Handle folder conflicts (falls Ordner NICHT Verzeichnis ist)
+            # Handle folder conflicts (if the target path exists but is NOT a directory)
             counter = 1
             original_target = target_folder
             while target_folder.exists() and not target_folder.is_dir():
@@ -247,7 +271,7 @@ class DicomFileOrganizer:
                 return ("success", result_msg)
 
         except Exception as e:
-            error_msg = f"❌ Fehler bei {file_path.name}: {e}"
+            error_msg = f"❌ Error with {file_path.name}: {e}"
             return ("error", error_msg)
 
     def organize_dicom_files(self, base_path, dry_run=False):
@@ -255,29 +279,29 @@ class DicomFileOrganizer:
         base_path = Path(base_path)
 
         if not base_path.exists():
-            print(f"❌ Pfad existiert nicht: {base_path}")
+            print(f"❌ Path does not exist: {base_path}")
             return
 
-        print(f"🔍 Scanne ALLE Dateien als DICOM in: {base_path}")
+        print(f"🔍 Scanning ALL files as DICOM in: {base_path}")
         if dry_run:
-            print("🔸 TESTLAUF - Keine echten Änderungen")
+            print("🔸 DRY RUN - no actual changes")
 
         # Find ALL files recursively (not just .dcm)
         # Use extended path prefix for Windows to handle long paths
-        print("📁 Suche ALLE Dateien (rekursiv)...")
+        print("📁 Searching ALL files (recursively)...")
         safe_base = self.get_windows_safe_path(base_path)
         dicom_files = [f for f in safe_base.rglob('*') if f.is_file()]
 
         if not dicom_files:
-            print("❌ Keine Dateien gefunden!")
+            print("❌ No files found!")
             return
 
-        print(f"📊 Gefunden: {len(dicom_files)} Dateien (werden alle als DICOM behandelt)")
-        print(f"🚀 Verwende {self.num_workers} Threads für die Verarbeitung")
+        print(f"📊 Found: {len(dicom_files)} files (all treated as DICOM)")
+        print(f"🚀 Using {self.num_workers} threads for processing")
         if self.hierarchical:
-            print("📂 Modus: Hierarchie mit bestehender Patient/Study-Struktur")
+            print("📂 Mode: hierarchy with existing patient/study structure")
         else:
-            print("📂 Modus: flache Serienordner direkt unter Basisordner")
+            print("📂 Mode: flat series folders directly below the base folder")
 
         # Process files with multithreading
         with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
@@ -288,7 +312,7 @@ class DicomFileOrganizer:
             }
 
             # Process results with progress bar
-            with tqdm(total=len(dicom_files), desc="Organisiere Dateien") as pbar:
+            with tqdm(total=len(dicom_files), desc="Organizing files") as pbar:
                 for future in as_completed(future_to_file):
                     file_path = future_to_file[future]
                     try:
@@ -297,7 +321,7 @@ class DicomFileOrganizer:
                         if status == "success":
                             with self.lock:
                                 self.organized += 1
-                            # Nur jede 50. Success-Meldung oder kurze Meldungen ausgeben
+                            # Only print every 50th success message or short messages
                             if self.organized % 50 == 0 or len(message) < 150:
                                 tqdm.write(message)
                         else:
@@ -308,46 +332,47 @@ class DicomFileOrganizer:
                     except Exception as e:
                         with self.lock:
                             self.errors += 1
-                        tqdm.write(f"❌ Unerwarteter Fehler bei {file_path.name}: {e}")
+                        tqdm.write(f"❌ Unexpected error with {file_path.name}: {e}")
 
                     pbar.update(1)
 
         # Summary
-        print(f"\n📊 Organisierung abgeschlossen:")
-        print(f"   ✅ Organisiert: {self.organized} Dateien")
-        print(f"   ❌ Fehler: {self.errors} Dateien")
+        print(f"\n📊 Organizing finished:")
+        print(f"   ✅ Organized: {self.organized} files")
+        print(f"   ❌ Errors: {self.errors} files")
 
         if self.organized + self.errors > 0:
-            print(f"   🎯 Erfolgsrate: {(self.organized / (self.organized + self.errors) * 100):.1f}%")
+            print(f"   🎯 Success rate: {(self.organized / (self.organized + self.errors) * 100):.1f}%")
 
         # Remove empty folders
-        print("🧹 Entferne leere Ordner...")
+        print("🧹 Removing empty folders...")
         self.remove_empty_folders(safe_base)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Organisiere ALLE Dateien als DICOM-Dateien in Ordner basierend auf Metadaten")
-    parser.add_argument("path", help="Pfad mit DICOM-Dateien")
+    """Command-line entry point (see module docstring for usage)."""
+    parser = argparse.ArgumentParser(description="Organize ALL files as DICOM files into folders based on their metadata")
+    parser.add_argument("path", help="Path containing the DICOM files")
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Zeige was passieren würde ohne echte Änderungen"
+        help="Show what would happen without making actual changes"
     )
     parser.add_argument(
         "-j", "--workers",
         type=int,
         default=14,
-        help="Anzahl der Threads für parallele Verarbeitung (Standard: 14)"
+        help="Number of threads for parallel processing (default: 14)"
     )
     parser.add_argument(
         "--keep-long-names",
         action="store_true",
-        help="Behalte ursprüngliche lange Dateinamen (Standard: kürzen)"
+        help="Keep the original long file names (default: shorten)"
     )
     parser.add_argument(
         "--flat",
         action="store_true",
-        help="Keine Patient/Study/Series-Hierarchie, alles direkt unter dem Basisordner"
+        help="No patient/study/series hierarchy, everything directly below the base folder"
     )
 
     args = parser.parse_args()

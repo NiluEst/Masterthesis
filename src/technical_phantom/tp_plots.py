@@ -1,14 +1,22 @@
 """
-Technisches Phantom – PLOTS
-===========================
-Liest die von tp_compute.py gespeicherten Ergebnisse (.pkl) und speichert ALLE Plots als SVG
-(es wird nichts angezeigt). Pro Modus entstehen Einzelplots UND Multi-Figures (a, b, c ...).
+Technical phantom – PLOTS
+=========================
+Second stage of the technical-phantom pipeline: reads the results (.pkl) written by
+tp_compute.py and saves ALL plots as SVG (nothing is shown on screen). For every mode,
+both single plots AND multi-panel figures (panels a, b, c ...) are produced.
 
-Start:
-    python tp_plots.py            -> Menü (Modus wählen oder 6 = alles)
-    python tp_plots.py 4          -> direkt Modus 4 (Dosis-Serie)
-    python tp_plots.py pfad.pkl   -> bestimmte .pkl
-Ausgabe: PLOTS_DIR/<modus>/  (wird bei jedem Lauf überschrieben)
+Each .pkl contains a bundle dict ``{"mode": ..., "name": ..., "plots": [...]}``; every entry
+in ``"plots"`` is ``{"kind": <key of PLOT_FUNCS>, "data": <keyword arguments of that plot function>}``.
+tp_compute.py calls ``render()`` automatically at the end of a run; this module can also be run
+on its own to re-plot existing results (e.g. after changing the plot style).
+
+Usage:
+    python tp_plots.py            -> menu (choose a mode, or 6 = everything)
+    python tp_plots.py 4          -> mode 4 directly (dose series)
+    python tp_plots.py path.pkl   -> one specific .pkl file
+Modes: 1 = single analysis, 2 = EICT/PCCT comparison, 3 = batch (kernel comparison),
+       4 = dose series, 5 = line pairs, 6 = all (newest results of every mode).
+Output: PLOTS_DIR/<mode>/  (overwritten on every run)
 """
 import os
 import re
@@ -28,72 +36,79 @@ from scipy.signal import savgol_filter
 
 from tp_config import (INSERT_NAMES, HU_ACCURACY_LIMITS, UNIFORMITY_TOLERANCE_PCT,
                        UNIFORMITY_POSITIONS_DEG, RESULTS_DIR, PLOTS_DIR)
-from tp_helpers import _mtf_level, _kernel_group
+from tp_helpers import _mtf_level, _kernel_group, _window_limits
 
-# ── Globale Einstellungen ──────────────────────────────────────────
-# Alle Plots: gleiche Figurgröße, gleiche Ränder (Achsen liegen überall an derselben Stelle),
-# eine Schrift, eine Schriftgröße. Bei 100 % in Inkscape ist das die Druckgröße.
-FIG_SIZE = (5.0, 3.75)      # Breite, Höhe in Zoll (12,7 x 9,5 cm) – für ALLE Plots
-FONT_SIZE = 12              # pt – für ALLE Texte (Achsen, Ticks, Legende, Titel, Annotationen)
-MARGINS = dict(left=0.19, right=0.97, bottom=0.21, top=0.90)   # fester Achsenrahmen (Anteil der Figur)
+# ── Global settings ────────────────────────────────────────────────
+# All plots: same figure size, same margins (axes are in the same place everywhere),
+# one font, one font size. At 100 % zoom in Inkscape this is the print size.
+FIG_SIZE = (5.0, 3.75)      # width, height in inches (12.7 x 9.5 cm) – for ALL plots
+FONT_SIZE = 12              # pt – for ALL text (axes, ticks, legend, titles, annotations)
+MARGINS = dict(left=0.19, right=0.97, bottom=0.21, top=0.90)   # fixed axes frame (fraction of the figure)
 
 plt.rcParams.update({
-    "svg.fonttype": "none",          # Text bleibt echter Text (in Inkscape editierbar)
+    "svg.fonttype": "none",          # text stays real text (editable in Inkscape)
     "font.family": "sans-serif",
-    "font.sans-serif": ["Arial", "DejaVu Sans"],   # Fallback, falls Arial fehlt
+    "font.sans-serif": ["Arial", "DejaVu Sans"],   # fallback if Arial is missing
     "font.size": FONT_SIZE,
     "axes.titlesize": "medium", "axes.labelsize": "medium",
     "xtick.labelsize": "medium", "ytick.labelsize": "medium",
     "legend.fontsize": "medium", "legend.title_fontsize": "medium",
     "figure.titlesize": "medium",
-    "mathtext.fontset": "custom",    # Formeltext ($U_i$) ebenfalls in Arial
+    "mathtext.fontset": "custom",    # math text ($U_i$) also in Arial
     "mathtext.rm": "Arial", "mathtext.it": "Arial:italic", "mathtext.bf": "Arial:bold",
     "mathtext.default": "regular",
     "axes.linewidth": 1.0, "lines.linewidth": 1.8,
     "xtick.major.width": 1.0, "ytick.major.width": 1.0,
     "legend.framealpha": 0.9,
     "figure.max_open_warning": 0,
-    "toolbar": "None",               # keine Toolbar -> Fenster erzwingt keine andere Figurbreite
+    "toolbar": "None",               # no toolbar -> a window cannot force a different figure width
 })
-# Multi-Figures (Breite = FIG_SIZE[0]; Höhe = Anzahl Panels x MULTI_PANEL_H)
-MULTI_PANEL_H = 3.4                 # Zoll pro Panel (inkl. x-Beschriftung und Platz für den Buchstaben)
-MULTI_MARGINS_IN = dict(left=0.95, right=0.15, bottom=0.66, top=0.34)   # Zoll – identisch in allen Multi-Figures
+# Multi-panel figures (width = FIG_SIZE[0]; height = number of panels x MULTI_PANEL_H)
+MULTI_PANEL_H = 3.4                 # inches per panel (incl. x-axis label and room for the panel letter)
+MULTI_MARGINS_IN = dict(left=0.95, right=0.15, bottom=0.66, top=0.34)   # inches – identical in all multi-panel figures
 PANEL_LABEL_FMT = "{}"              # "{}" -> a, b, c   |   "({})" -> (a), (b), (c)
-PANEL_LABEL_SIZE = 18               # pt – Größe der Panel-Buchstaben (a, b, c)
-RATIO_CAP_WIDTH = 0.25             # Breite der Querstriche an den schwarzen Ratio-Pfeilen (vorher 0.6)
-CURVE_CUTOFF_PAD = 1.15             # x-Achse endet bei (Punkt, an dem alle Kurven bei Null sind) x 1.15 -> kurzer Auslauf
-CURVE_CUTOFF_FRAC = 0.01            # MTF-/NPS-Kurven: x-Achse endet, wenn alle Kurven unter 1 % ihres Maximums liegen
-PANEL_LABEL_X_IN = 0.03             # Abstand der Buchstaben vom linken Rand (Zoll) – bei allen Panels gleich
-DPRIME_FIGURE_MATERIALS = ["Teflon", "LDPE", "Acrylic"]   # Reihenfolge der d'-Multi-Figure (Modus 4)
-SHOW_TITLES = False         # False = keine Titel in der Grafik (Journal: Titel gehören in die Caption)
+PANEL_LABEL_SIZE = 18               # pt – size of the panel letters (a, b, c)
+RATIO_CAP_WIDTH = 0.25             # width of the end caps on the black ratio brackets (previously 0.6)
+CURVE_CUTOFF_PAD = 1.15             # x-axis ends at (point where all curves have reached zero) x 1.15 -> short run-out
+CURVE_CUTOFF_FRAC = 0.01            # MTF/NPS curves: x-axis ends once all curves are below 1 % of their maximum
+PANEL_LABEL_X_IN = 0.03             # distance of the panel letters from the left edge (inches) – same for all panels
+DPRIME_FIGURE_MATERIALS = ["Teflon", "LDPE", "Acrylic"]   # panel order of the d' multi-panel figure (mode 4)
+SHOW_TITLES = False         # False = no titles in the graphic (journal style: titles belong in the caption)
+# Line style / colour / legend label per scanner family (keys = scanner_type from the results; EID = EICT)
 FAMILY = {"EID": {"label": "EICT", "linestyle": (0, (5, 5)), "color": "tab:blue"},
           "PCCT": {"label": "PCCT", "linestyle": "-", "color": "tab:orange"}}
 TTF_COLORS = {"Teflon": "tab:red", "LDPE": "tab:green", "Delrin": "tab:purple", "Acrylic": "tab:blue"}
 
-_OUT_DIR = PLOTS_DIR
+_OUT_DIR = PLOTS_DIR    # current output folder; set per mode by render()
 
 
 # ══════════════════════════════════════════════════════════════════
-# HILFSFUNKTIONEN
+# HELPER FUNCTIONS
 # ══════════════════════════════════════════════════════════════════
 def _fname(*parts):
+    """Join the non-empty name parts with "_" and replace characters that are unsafe in file names."""
     raw = "_".join(str(p) for p in parts if p not in (None, ""))
     return re.sub(r"[^\w\-.]+", "_", raw).strip("_")
 
 
 def _save(fig, *name_parts, size=None, strip_titles=True):
+    """Save `fig` as <_OUT_DIR>/<name_parts joined>.svg.
+
+    size: figure size in inches (default FIG_SIZE). strip_titles: remove all axes titles
+    unless SHOW_TITLES is set.
+    """
     os.makedirs(_OUT_DIR, exist_ok=True)
     path = os.path.join(_OUT_DIR, _fname(*name_parts) + ".svg")
     if strip_titles and not SHOW_TITLES:
         for a in fig.axes:
             a.set_title("")
     fig.set_size_inches(*(size or FIG_SIZE))
-    fig.savefig(path, format="svg")          # bewusst OHNE bbox_inches="tight" -> alle SVGs exakt gleich groß
+    fig.savefig(path, format="svg")          # deliberately WITHOUT bbox_inches="tight" -> all SVGs have exactly the same size
     print(f"  SVG: {path}")
 
 
 def _new_fig():
-    """Neue Figur (ohne pyplot -> es öffnet sich nie ein Fenster) mit festem Achsenrahmen."""
+    """Create a new figure (without pyplot -> no window is ever opened) with a fixed axes frame."""
     fig = Figure(figsize=FIG_SIZE)
     ax = fig.add_subplot(111)
     fig.subplots_adjust(**{**MARGINS, **({} if SHOW_TITLES else {"top": 0.97})})
@@ -101,8 +116,11 @@ def _new_fig():
 
 
 def _cut_x_at_zero(ax, curves, frac=None, pad=None, keep_x=()):
-    """x-Achse bis dorthin, wo ALLE Kurven die Nulllinie erreicht haben (|y| < frac * Maximum).
-    curves: [(x, y), ...] – keep_x: x-Werte, die sichtbar bleiben müssen (z. B. MTF50/MTF10)."""
+    """Limit the x-axis to the point where ALL curves have reached zero (|y| < frac * global maximum).
+
+    curves: [(x, y), ...]; keep_x: x values that must stay visible (e.g. MTF50/MTF10).
+    The axis then runs from 0 to that point times `pad` (defaults: CURVE_CUTOFF_FRAC, CURVE_CUTOFF_PAD).
+    """
     frac = CURVE_CUTOFF_FRAC if frac is None else frac
     pad = CURVE_CUTOFF_PAD if pad is None else pad
     data = [(np.asarray(x, float), np.asarray(y, float)) for x, y in curves if len(y)]
@@ -122,13 +140,16 @@ def _cut_x_at_zero(ax, curves, frac=None, pad=None, keep_x=()):
 
 
 def _style_legend(ax, headroom=1.15, **kwargs):
-    """Legende oben rechts; Y-Achse oben erweitert, damit nichts verdeckt wird."""
+    """Legend in the upper right; the y-axis is extended upwards by `headroom` so that no data is hidden.
+
+    Duplicate legend labels are merged unless explicit `handles` are passed.
+    """
     ylim = ax.get_ylim()
     if np.isfinite(ylim[0]) and np.isfinite(ylim[1]) and ylim[1] > ylim[0]:
         ax.set_ylim(ylim[0], ylim[0] + (ylim[1] - ylim[0]) * headroom)
     defaults = dict(loc="upper right", bbox_to_anchor=(0.99, 0.99), borderaxespad=0.6, framealpha=0.9)
     defaults.update(kwargs)
-    if "handles" not in defaults:                       # doppelte Legendeneinträge zusammenfassen
+    if "handles" not in defaults:                       # merge duplicate legend entries
         h, l = ax.get_legend_handles_labels()
         uniq = dict(zip(l, h))
         defaults["handles"], defaults["labels"] = list(uniq.values()), list(uniq.keys())
@@ -136,7 +157,7 @@ def _style_legend(ax, headroom=1.15, **kwargs):
 
 
 def _add_ratio_bracket(ax, x_dim, lo, hi, ratio, x_text):
-    """Schwarzer I-Balken zwischen lo und hi bei x_dim; rote Ratio-Zahl mittig ÜBER dem höheren Balken."""
+    """Black I-shaped bracket from lo to hi at x_dim; red ratio label ("×1.23") centred ABOVE the taller bar at x_text."""
     ax.annotate("", xy=(x_dim, hi), xytext=(x_dim, lo),
                 arrowprops=dict(arrowstyle=f"|-|,widthA={RATIO_CAP_WIDTH},widthB={RATIO_CAP_WIDTH}",
                                 color="black", lw=1.2, shrinkA=0, shrinkB=0), zorder=3)
@@ -147,7 +168,16 @@ def _add_ratio_bracket(ax, x_dim, lo, hi, ratio, x_text):
 
 def _smooth_curve_for_plot(x_values, y_values, *, points=400, sigma=2.0, sigma_mode="index_scaled",
                            anchor_start=False, method="gaussian", savgol_window=31, savgol_poly=3):
-    """Nur Darstellungsglättung (beeinflusst keine gespeicherten Metriken)."""
+    """Smooth a curve for display only (does not affect any stored metrics).
+
+    The curve is sorted, de-duplicated, linearly resampled onto `points` (at least the original
+    number of) equally spaced x values and then smoothed:
+      - method="savgol": Savitzky-Golay filter (savgol_window, savgol_poly; window forced odd and > poly);
+      - otherwise: Gaussian filter; sigma_mode="physical" -> sigma in x units,
+        "index_scaled" -> sigma in original sample spacings (scaled to the dense grid).
+    anchor_start=True keeps the first (lowest-frequency) value unsmoothed.
+    Returns (x_dense, y_dense); inputs with fewer than 3 valid points are returned unchanged.
+    """
     x = np.asarray(x_values, float); y = np.asarray(y_values, float)
     if x.size < 3 or y.size < 3:
         return x, y
@@ -184,48 +214,51 @@ def _smooth_curve_for_plot(x_values, y_values, *, points=400, sigma=2.0, sigma_m
 
 
 def _smooth_mtf(fr, mtf, label_text=""):
+    """Display smoothing for MTF curves (Gaussian; stronger for the Br98 kernel)."""
     sig = 3.0 if "br98" in str(label_text).lower() else 2.0
     return _smooth_curve_for_plot(fr, mtf, points=500, sigma=sig, anchor_start=True)
 
 
 def _smooth_nps(fr, nps):
+    """Display smoothing for 1D NPS curves (Savitzky-Golay)."""
     return _smooth_curve_for_plot(fr, nps, points=500, method="savgol", savgol_window=45,
                                   savgol_poly=3, anchor_start=True)
 
 
-def _window_limits(img):
-    arr = np.asarray(img, float)
-    p1, p99 = np.percentile(arr, [1, 99])
-    w = float(max(10.0, p99 - p1)); c = 0.5 * (p1 + p99)
-    return c - 0.5 * w, c + 0.5 * w
-
-
 def _kernel_color_map(results):
+    """Map every kernel group occurring in `results` to a fixed tab10 colour (sorted by name)."""
     kernels = sorted({_kernel_group(r["kernel"]) for r in results})
     cmap = plt.get_cmap("tab10")
     return {k: cmap(i % 10) for i, k in enumerate(kernels)}
 
 
 def _family(r):
+    """Style dict from FAMILY for the scanner type of result `r` (falls back to PCCT)."""
     return FAMILY.get(str(r.get("scanner_type", "")).upper(), FAMILY["PCCT"])
 
 
 def _mtf_axes(ax, unit="lp/mm"):
+    """Standard MTF axes: reference lines at MTF = 0.5 and 0.1, y from 0 to 1.05, axis labels."""
     ax.axhline(0.5, color="gray", ls="--", lw=1); ax.axhline(0.1, color="gray", ls=":", lw=1)
     ax.set_xlim(left=0); ax.set_ylim(0, 1.05)
     ax.set_xlabel(f"Spatial Frequency ({unit})"); ax.set_ylabel("MTF")
 
 
 def _paired_bars(ax, x, a_vals, b_vals, w, labels, colors, bracket_left_of_pair=False, ratio_ab=True):
-    """Zwei Balken je Gruppe + Maßpfeil mittig in der Lücke zum Nachbarpaar (kein Overlap) + Ratio über dem Paar."""
+    """Two bars per group + a dimension bracket centred in the gap to the neighbouring pair (no overlap)
+    + the ratio above the pair.
+
+    bracket_left_of_pair: draw the bracket in the gap to the left (True) or right (False) of each pair.
+    ratio_ab: label shows a/b (True) or b/a (False). Returns the bracket offset from the group centre.
+    """
     ax.bar(x - w / 2, a_vals, width=w, label=labels[0], color=colors[0], zorder=2)
     ax.bar(x + w / 2, b_vals, width=w, label=labels[1], color=colors[1], zorder=2)
-    off = 0.5                                   # Mitte der Lücke zwischen zwei Balkenpaaren
+    off = 0.5                                   # middle of the gap between two bar pairs
     for xi, a, b in zip(x, a_vals, b_vals):
         if not (np.isfinite(a) and np.isfinite(b)):
             continue
         x_dim = xi - off if bracket_left_of_pair else xi + off
-        # Hilfslinien liegen HINTER den Balken -> überschneiden nie sichtbar
+        # dashed guide lines lie BEHIND the bars -> never visibly cross them
         ax.plot([xi - w / 2, x_dim], [a, a], color="black", lw=0.8, ls=(0, (3, 2)), zorder=1.5)
         ax.plot([xi + w / 2, x_dim], [b, b], color="black", lw=0.8, ls=(0, (3, 2)), zorder=1.5)
         if ratio_ab:
@@ -242,9 +275,10 @@ def _paired_bars(ax, x, a_vals, b_vals, w, labels, colors, bracket_left_of_pair=
 
 
 # ══════════════════════════════════════════════════════════════════
-# EINZELANALYSE
+# SINGLE ANALYSIS (mode 1)
 # ══════════════════════════════════════════════════════════════════
 def plot_nps(label, nps_2d, freqs, nps_1d, upsilon):
+    """2D NPS (log1p) and 1D NPS of one dataset; `upsilon` = ΥNPS (noise magnitude in HU) shown in the title."""
     fr = np.asarray(freqs, float)
     fig, ax = _new_fig()
     im = ax.imshow(np.log1p(nps_2d), cmap="magma", extent=[fr[0], fr[-1], fr[-1], fr[0]])
@@ -255,12 +289,13 @@ def plot_nps(label, nps_2d, freqs, nps_1d, upsilon):
     fig, ax = _new_fig()
     ax.plot(fr, nps_1d, color="navy", lw=2)
     _cut_x_at_zero(ax, [(fr, nps_1d)])
-    ax.set_title(f"1D NPS | ΥNPS={upsilon:.2f}")
-    ax.set_xlabel("Freq (1/mm)"); ax.grid(alpha=0.3)
+    ax.set_title(f"1D NPS | ΥNPS = {upsilon:.2f} HU")
+    ax.set_xlabel("Freq (1/mm)"); ax.set_ylabel("1D NPS (HU²·mm²)"); ax.grid(alpha=0.3)
     _save(fig, label, "NPS_1D")
 
 
 def _plot_mtf_curve(fr, mtf, m50, m10, unit, title, label, name):
+    """1D MTF curve with vertical markers at MTF50 / MTF10 (in `unit`)."""
     fig, ax = _new_fig()
     ax.plot(fr, mtf, color="navy", lw=1.5, label="MTF")
     ax.axhline(0.5, color="gray", ls="--", lw=1); ax.axhline(0.1, color="gray", ls=":", lw=1)
@@ -277,6 +312,7 @@ def _plot_mtf_curve(fr, mtf, m50, m10, unit, title, label, name):
 
 
 def plot_mtf_psb(label, image, point_xy, result, roi_size_px):
+    """MTF from a point source / bead (PBS): ROI on the image, centred PSF, 2D MTF and 1D MTF."""
     px, py = point_xy
     w_px, h_px = roi_size_px
     fig, ax = _new_fig()
@@ -302,6 +338,8 @@ def plot_mtf_psb(label, image, point_xy, result, roi_size_px):
 
 
 def plot_mtf_linepairs(label, image, line_start, line_end, profile_data, result):
+    """MTF from a line-pair edge profile (ESF method): image with profile line, raw profile + ESF,
+    upsampled ESF and the resulting MTF (in lp/cm if available, otherwise lp/mm)."""
     if "fr_lp_cm" in result and len(np.asarray(result["fr_lp_cm"])) > 1:
         fr = np.asarray(result["fr_lp_cm"], float)
         mtf50, mtf10, unit = result.get("mtf50_lp_cm", np.nan), result.get("mtf10_lp_cm", np.nan), "lp/cm"
@@ -315,14 +353,14 @@ def plot_mtf_linepairs(label, image, line_start, line_end, profile_data, result)
     sigma_val = result.get("sigma_mm", float("nan"))
     sigma_str = f"sigma={sigma_val:.4f} mm" if np.isfinite(sigma_val) else "sigma: n/a"
 
-    # 1) Bild mit Profil-Linie
+    # 1) Image with profile line
     fig, ax = _new_fig()
     ax.imshow(image, cmap="gray")
     ax.plot([line_start[0], line_end[0]], [line_start[1], line_end[1]], "r-", lw=1.5)
     ax.set_title("Image with line profile"); ax.axis("off")
     _save(fig, label, "MTF-LP_1_image")
 
-    # 2) Profil + normierte ESF (Zweitachse, kein Subplot)
+    # 2) Profile + normalised ESF (secondary y-axis, no subplot)
     fig, ax = _new_fig()
     pix = np.arange(len(prof))
     ax.plot(pix, prof, "b-", lw=1.5, label="Raw profile")
@@ -336,7 +374,8 @@ def plot_mtf_linepairs(label, image, line_start, line_end, profile_data, result)
     ax.grid(alpha=0.3)
     _save(fig, label, "MTF-LP_2_profile_ESF")
 
-    # 3) Upsampled ESF (+ Gauß-Darstellung wie bisher)
+    # 3) Upsampled ESF (+ illustrative Gaussian curve, as before; its sigma is a display heuristic,
+    #    not the fitted sigma_mm from `result`)
     fig, ax = _new_fig()
     if len(esf) > 0:
         ax.plot(np.arange(len(esf)), esf, "g-", lw=1.5, label="Upsampled ESF")
@@ -363,6 +402,8 @@ def plot_mtf_linepairs(label, image, line_start, line_end, profile_data, result)
 
 
 def plot_ttf_dprime(label, ctp404, rois_by_material, ttf_results, dprime_by_material, contrast_by_material):
+    """TTF analysis on the CTP404 module: insert positions, normalised LSFs and TTF curves per material
+    (legend: TTF50 of the smoothed curve, d' and contrast ΔHU)."""
     names = list(ttf_results.keys())
 
     fig, ax = _new_fig()
@@ -391,7 +432,7 @@ def plot_ttf_dprime(label, ctp404, rois_by_material, ttf_results, dprime_by_mate
     for n in names:
         fr_p, ttf_p = _smooth_curve_for_plot(ttf_results[n]["fr_lp_mm"], ttf_results[n]["ttf"],
                                              points=400, sigma=2.0, anchor_start=True)
-        ttf50 = _mtf_level(fr_p, ttf_p, 0.5)   # nur Legende (geglättete Kurve, wie bisher)
+        ttf50 = _mtf_level(fr_p, ttf_p, 0.5)   # legend only (from the smoothed curve, as before)
         lbl = (f"{n} | TTF50={ttf50:.3f} | d'={dprime_by_material.get(n, np.nan):.3f} "
                f"| ΔHU={contrast_by_material.get(n, np.nan):.0f}")
         ax.plot(fr_p, ttf_p, color=TTF_COLORS.get(n, "gray"), lw=1.5, label=lbl)
@@ -403,9 +444,10 @@ def plot_ttf_dprime(label, ctp404, rois_by_material, ttf_results, dprime_by_mate
 
 
 # ══════════════════════════════════════════════════════════════════
-# VERGLEICH (2 Datensätze)
+# COMPARISON (2 datasets, mode 2)
 # ══════════════════════════════════════════════════════════════════
 def _draw_nps_comparison(ax, curves):
+    """Smoothed 1D NPS curves of several datasets on one axes (legend with ΥNPS)."""
     drawn = []
     for c in curves:
         fr_p, nps_p = _smooth_nps(c["nps_freqs"], c["nps_1d"])
@@ -444,6 +486,7 @@ def plot_mtf_comparison(tag, curves):
 
 
 def plot_mtf_delta(tag, grid, delta, label):
+    """Difference curve ΔMTF between the two compared datasets on a common frequency grid."""
     fig, ax = _new_fig()
     ax.plot(grid, delta, color="tab:purple", lw=1.5, label=label)
     ax.axhline(0, color="gray", ls="--", lw=1)
@@ -454,6 +497,8 @@ def plot_mtf_delta(tag, grid, delta, label):
 
 
 def plot_hu_accuracy_comparison(tag, ct_numbers_1, ct_numbers_2, label_1, label_2):
+    """Measured CT numbers per insert for both datasets against the HU_ACCURACY_LIMITS
+    (grey band = lower–upper limit, dashed line = reference baseline)."""
     x = np.arange(len(INSERT_NAMES), dtype=float)
     fig, ax = _new_fig()
     for xi, n in zip(x, INSERT_NAMES):
@@ -478,6 +523,10 @@ def plot_hu_accuracy_comparison(tag, ct_numbers_1, ct_numbers_2, label_1, label_
 
 def plot_uniformity_comparison(tag, u1, u2, label_1, label_2, tol=UNIFORMITY_TOLERANCE_PCT,
                                show_band=False, stem_width=3, marker_size=50, group_offset=0.09, annotation_offset=12):
+    """Uniformity index U_i (%) per peripheral position for both datasets as lollipop stems from 0.
+
+    tol: tolerance in % (shown in the text box; as a grey band only if show_band=True).
+    """
     names = list(UNIFORMITY_POSITIONS_DEG.keys())
     x = np.arange(len(names), dtype=float)
     fig, ax = _new_fig()
@@ -509,7 +558,7 @@ def plot_uniformity_comparison(tag, u1, u2, label_1, label_2, tol=UNIFORMITY_TOL
 
 
 def _draw_cnr_bars(ax, cnr_1, cnr_2, label_1, label_2):
-    """Alle Materialien in einem Plot: Balkenpaar je Material + Ratio-Pfeil (cnr_2 / cnr_1)."""
+    """All materials in one plot: one bar pair per material + ratio bracket (cnr_2 / cnr_1)."""
     x = np.arange(len(INSERT_NAMES), dtype=float); w = 0.3
     v1 = [float(cnr_1.get(n, np.nan)) for n in INSERT_NAMES]
     v2 = [float(cnr_2.get(n, np.nan)) for n in INSERT_NAMES]
@@ -532,9 +581,13 @@ def plot_cnr_comparison(tag, cnr_1, cnr_2, label_1, label_2):
 
 
 # ══════════════════════════════════════════════════════════════════
-# BATCH (Kernel-Vergleich)
+# BATCH (kernel comparison, mode 3)
 # ══════════════════════════════════════════════════════════════════
 def _draw_kernel_curves(ax, results, x_key, y_key, smooth, ylabel, xlabel, ylim):
+    """Curves of all batch results on one axes: colour = kernel group, line style = scanner family.
+
+    x_key / y_key: result keys of the curve; smooth: function(result) -> (x, y) for display.
+    """
     colors = _kernel_color_map(results)
     drawn = []
     for r in results:
@@ -568,6 +621,7 @@ def _draw_kernel_nps(ax, results):
 
 
 def plot_kernel_mtf_nps(results):
+    """MTF and 1D NPS of all kernels (two separate plots)."""
     for draw, name in ((_draw_kernel_mtf, "MTF"), (_draw_kernel_nps, "NPS_1D")):
         fig, ax = _new_fig()
         draw(ax, results)
@@ -575,6 +629,7 @@ def plot_kernel_mtf_nps(results):
 
 
 def _draw_kernel_upsilon(ax, kernels, series):
+    """ΥNPS per kernel; `series` maps scanner type ("PCCT"/"EID") to one value per kernel (NaN = missing)."""
     x = np.arange(len(kernels), dtype=float)
     for stype, ys in series.items():
         ok = [(xi, y) for xi, y in zip(x, ys) if np.isfinite(y)]
@@ -594,10 +649,13 @@ def plot_kernel_upsilon(kernels, series):
 
 
 # ══════════════════════════════════════════════════════════════════
-# LINIENPAARE
+# LINE PAIRS (mode 5)
 # ══════════════════════════════════════════════════════════════════
 def _draw_linepair_zoom(ax, e, colors, draw_line=True, lw_frame=3.5):
-    """Rahmenfarbe = Kernel, Rahmenstil = Scanner (PCCT durchgezogen, EID gestrichelt)."""
+    """Zoomed line-pair crop (optionally with the profile line in red).
+
+    Frame colour = kernel group, frame style = scanner (PCCT solid, EID dashed). Returns the frame colour.
+    """
     vmin, vmax = _window_limits(e["crop"])
     ax.imshow(e["crop"], cmap="gray", vmin=vmin, vmax=vmax)
     if draw_line:
@@ -613,7 +671,7 @@ def _draw_linepair_zoom(ax, e, colors, draw_line=True, lw_frame=3.5):
 
 
 def plot_linepair_zoom(entries, draw_line=True):
-    """Ein Bild pro Datensatz."""
+    """One zoomed line-pair image per dataset."""
     colors = _kernel_color_map(entries)
     for e in entries:
         fig, ax = _new_fig()
@@ -623,6 +681,7 @@ def plot_linepair_zoom(entries, draw_line=True):
 
 
 def plot_linepair_profiles(entries):
+    """HU profiles along the line-pair line of all datasets (x normalised to 0–1); EID dashed with white halo."""
     colors = _kernel_color_map(entries)
     fam_lbl = {"EID": "XCite", "PCCT": "Alpha"}
     fig, ax = _new_fig()
@@ -644,9 +703,15 @@ def plot_linepair_profiles(entries):
 
 
 # ══════════════════════════════════════════════════════════════════
-# DOSIS-SERIE
+# DOSE SERIES (mode 4)
 # ══════════════════════════════════════════════════════════════════
+# The dose plots receive a dict `g` with "doses" (CTDIvol in mGy per group) and one value per dose
+# group for "PCCT" and "EID".
 def _draw_dose_bars(ax, g, ylabel, legend_suffix, title="", ylim_factor=None, headroom=1.6):
+    """PCCT/EICT bar pair per CTDIvol group with ratio bracket (PCCT / EICT).
+
+    ylim_factor: if given, y-axis = 0 … max value x ylim_factor; otherwise extend the top by `headroom`.
+    """
     x = np.arange(len(g["doses"]), dtype=float); w = 0.3
     _paired_bars(ax, x, g["PCCT"], g["EID"], w, (f"PCCT {legend_suffix}", f"EICT {legend_suffix}"),
                  ("tab:orange", "tab:blue"))
@@ -684,6 +749,7 @@ def plot_dprime_dose(g, material, diameter_mm=None):
 
 
 def plot_hu_dose(by_material):
+    """HU vs. CTDIvol per insert material (PCCT vs. EICT) with the acceptable range from HU_ACCURACY_LIMITS."""
     for name, g in by_material.items():
         lim = HU_ACCURACY_LIMITS[name]
         fig, ax = _new_fig()
@@ -698,6 +764,10 @@ def plot_hu_dose(by_material):
 
 
 def plot_uniformity_dose(by_position, tol=UNIFORMITY_TOLERANCE_PCT, y_range=None):
+    """Uniformity index U_i (%) vs. CTDIvol per position (PCCT vs. EICT), grey band = ±tol.
+
+    y_range: fixed symmetric y-limit in %; None = automatic from the data.
+    """
     for name, g in by_position.items():
         fig, ax = _new_fig()
         lo, hi = (max(-tol, -y_range), min(tol, y_range)) if y_range is not None else (-tol, tol)
@@ -722,6 +792,7 @@ def plot_uniformity_dose(by_position, tol=UNIFORMITY_TOLERANCE_PCT, y_range=None
 
 
 def _draw_nps_dose(ax, g):
+    """ΥNPS per CTDIvol group, PCCT vs. EICT."""
     x = np.arange(len(g["doses"]), dtype=float)
     for stype in ("PCCT", "EID"):
         ok = [(xi, y) for xi, y in zip(x, g[stype]) if np.isfinite(y)]
@@ -736,8 +807,8 @@ def _draw_nps_dose(ax, g):
 
 
 def plot_uniformity_center_hu_dose(g):
-    """Center-HU des CTP486 pro CTDIvol, PCCT vs. EICT (Linien). Erklärt, warum
-    U_i bei EICT prozentual größer wird: der Nenner (Center+100) sinkt mit sinkendem Center-HU."""
+    """Centre HU of the CTP486 module per CTDIvol, PCCT vs. EICT (lines). Explains why the
+    percentage U_i becomes larger for EICT: the denominator (centre + 100) decreases as the centre HU drops."""
     x = np.arange(len(g["doses"]), dtype=float)
     fig, ax = _new_fig()
     for stype in ("PCCT", "EID"):
@@ -761,21 +832,22 @@ def plot_nps_dose(g):
 
 
 # ══════════════════════════════════════════════════════════════════
-# MULTI-FIGURES (a, b, c ...) – gleiche Breite, gleiche Ränder, Buchstaben bündig links
+# MULTI-PANEL FIGURES (a, b, c ...) – same width, same margins, letters left-aligned
 # ══════════════════════════════════════════════════════════════════
 def _panel_letter(fig, i, y_top_in, H):
+    """Place panel letter number i (0 -> a) at y_top_in inches from the top of a figure of height H inches."""
     fig.text(PANEL_LABEL_X_IN / fig.get_figwidth(), 1 - y_top_in / H, PANEL_LABEL_FMT.format(chr(97 + i)),
              ha="left", va="top", fontweight="bold", fontsize=PANEL_LABEL_SIZE)
 
 
 def _stacked_figure(draws, *name_parts):
-    """Multi-Panel:
-       1 Panel  = eine Zelle (volle Höhe)
-       2 Panels = nebeneinander  (a links, b rechts)
-       3 Panels = a/b nebeneinander oben, c zentriert darunter
-       >=4      = untereinander (wie bisher)
-       Alle Achsenrahmen sind GENAU gleich groß und die Buchstaben sitzen überall am selben
-       Platz in ihrer Zelle. Positionen werden in Zoll gerechnet und direkt mit add_axes gesetzt."""
+    """Multi-panel figure; `draws` is a list of functions draw(ax), one per panel. Layout:
+       1 panel  = one cell (full height)
+       2 panels = side by side  (a left, b right)
+       3 panels = a/b side by side at the top, c centred below
+       >=4      = stacked vertically (as before)
+       All axes frames have EXACTLY the same size and the letters sit at the same place in their
+       cell everywhere. Positions are computed in inches and set directly with add_axes."""
     n = len(draws)
     W_cell = FIG_SIZE[0]; H_cell = MULTI_PANEL_H
     m = MULTI_MARGINS_IN
@@ -800,22 +872,22 @@ def _stacked_figure(draws, *name_parts):
         _save(fig, *name_parts, size=(W, H), strip_titles=False)
         return
 
-    # 2 oder 3 Panels: 2 Spalten
+    # 2 or 3 panels: 2 columns
     cols = 2
     rows = 1 if n == 2 else 2
     W = W_cell * cols
     H = H_cell * rows
     fig = Figure(figsize=(W, H))
 
-    # Zellen-Ursprünge (links, oben) in Zoll pro Panel
+    # cell origins (left, top) in inches per panel
     cell_origins = [(0, 0), (W_cell, 0)]
     if n == 3:
-        cell_origins.append(((W - W_cell) / 2, H_cell))   # c zentriert zwischen den beiden oberen
+        cell_origins.append(((W - W_cell) / 2, H_cell))   # c centred between the two upper panels
 
     axes = []
     for i, (ox, oy) in enumerate(cell_origins):
         left = ox + m["left"]
-        bot = H - (oy + H_cell) + m["bottom"]              # von oben nach unten gemessen
+        bot = H - (oy + H_cell) + m["bottom"]              # oy is measured from the top -> convert to bottom-based
         ax = fig.add_axes([left / W, bot / H, ax_w_in / W, ax_h_in / H])
         draws[i](ax); ax.set_title("")
         axes.append(ax)
@@ -827,12 +899,13 @@ def _stacked_figure(draws, *name_parts):
 
 
 def _linepair_grid(entries, draw_line, *name_parts):
-    """Zeile a = PCCT, Zeile b = EICT; gleicher Kernel steht jeweils untereinander."""
+    """Grid of zoomed line-pair images: row a = PCCT, row b = EICT; the same kernel is in the same column
+    (kernels sorted by their number). Empty cells where a scanner/kernel combination is missing."""
     kernels = sorted({_kernel_group(e["kernel"]) for e in entries}, key=lambda k: int(re.search(r"\d+", k).group()))
     rows = [("PCCT", "PCCT"), ("EID", "EICT")]
     colors = _kernel_color_map(entries)
-    ncol = len(kernels); W = 2 * FIG_SIZE[0]                 # volle Seitenbreite (= 2 x Einzelplot)
-    L, R, T, B, wsp, hgap = 0.80, 0.10, 0.45, 0.10, 0.05, 0.35
+    ncol = len(kernels); W = 2 * FIG_SIZE[0]                 # full page width (= 2 x single plot)
+    L, R, T, B, wsp, hgap = 0.80, 0.10, 0.45, 0.10, 0.05, 0.35   # margins / row gap in inches, wsp = relative column gap
     cell_w = (W - L - R) / (ncol + (ncol - 1) * wsp)
     c0 = entries[0]["crop"]; cell_h = cell_w * c0.shape[0] / c0.shape[1]
     H = T + 2 * cell_h + hgap + B
@@ -858,19 +931,24 @@ def _linepair_grid(entries, draw_line, *name_parts):
 
 
 def _is_wire(bundle):
+    """True for a batch run on the wire phantom (bundle name starts with "batch_wire")."""
     return str(bundle.get("name", "")).startswith("batch_wire")
 
 
 def _guard(name, fn):
-    """Jede Multi-Figure läuft für sich: schlägt eine fehl, werden die anderen trotzdem erzeugt."""
+    """Run each multi-panel figure on its own: if one fails, the others are still created."""
     try:
         fn()
     except Exception as ex:
-        print(f"  FEHLER bei Multi-Figure '{name}': {ex}")
+        print(f"  ERROR in multi-panel figure '{name}': {ex}")
         traceback.print_exc()
 
 
 def build_multifigures(bundle):
+    """Combine the single-plot data of a bundle into the multi-panel figures of its mode:
+    compare -> CNR + NPS; batch (not for the wire phantom) -> MTF + ΥNPS;
+    dose -> CNR + ΥNPS and d' (DPRIME_FIGURE_MATERIALS); linepairs -> image grid.
+    Figures whose input data are missing in the .pkl are skipped with a message."""
     mode = bundle["mode"]
     items = {}
     for it in bundle["plots"]:
@@ -879,7 +957,7 @@ def build_multifigures(bundle):
     def need(name, *kinds):
         missing = [k for k in kinds if not items.get(k)]
         if missing:
-            print(f"  Multi-Figure '{name}' übersprungen – fehlende Daten in der .pkl: {', '.join(missing)}")
+            print(f"  Multi-panel figure '{name}' skipped – missing data in the .pkl: {', '.join(missing)}")
         return not missing
 
     if mode == "compare" and need("CNR_NPS", "cnr_comparison", "nps_comparison"):
@@ -905,7 +983,7 @@ def build_multifigures(bundle):
             mats = [m for m in DPRIME_FIGURE_MATERIALS if m in by_mat]
             absent = [m for m in DPRIME_FIGURE_MATERIALS if m not in by_mat]
             if absent:
-                print(f"  Hinweis d'-Figure: keine Daten für {', '.join(absent)} (vorhanden: {', '.join(by_mat) or '-'})")
+                print(f"  Note d' figure: no data for {', '.join(absent)} (available: {', '.join(by_mat) or '-'})")
             if mats:
                 _guard("dprime", lambda: _stacked_figure(
                     [(lambda ax, d=by_mat[m]: _draw_dprime_dose(ax, d["g"], d["material"], d.get("diameter_mm")))
@@ -918,8 +996,10 @@ def build_multifigures(bundle):
 
 
 # ══════════════════════════════════════════════════════════════════
-# DISPATCH (Einzelplots)
+# DISPATCH (single plots)
 # ══════════════════════════════════════════════════════════════════
+# "kind" of a plot entry in the .pkl -> plot function (called with the entry's "data" as keyword arguments).
+# The keys must match the kinds written by tp_compute.py.
 PLOT_FUNCS = {
     "nps": plot_nps, "mtf_psb": plot_mtf_psb, "mtf_linepairs": plot_mtf_linepairs,
     "ttf_dprime": plot_ttf_dprime,
@@ -933,39 +1013,43 @@ PLOT_FUNCS = {
 }
 
 
+# menu number -> mode name (= "mode" in the .pkl, prefix of the .pkl file name and output sub-folder)
 MODES = {"1": "single", "2": "compare", "3": "batch", "4": "dose", "5": "linepairs"}
-MODE_TEXT = {"1": "Einzelanalyse", "2": "Vergleich EICT/PCCT", "3": "Batch (Kernel-Vergleich)",
-             "4": "Dosis-Serie", "5": "Linienpaare"}
+MODE_TEXT = {"1": "Single analysis", "2": "Comparison EICT/PCCT", "3": "Batch (kernel comparison)",
+             "4": "Dose series", "5": "Line pairs"}
 
 
 def render(path):
-    """Plottet eine .pkl: Einzelplots + Multi-Figures -> SVG in PLOTS_DIR/<modus>/ (nichts wird angezeigt)."""
+    """Plot one .pkl: single plots + multi-panel figures -> SVG in PLOTS_DIR/<mode>/ (nothing is shown).
+
+    A failing plot is reported and skipped; the remaining plots are still created.
+    """
     global _OUT_DIR
     with open(path, "rb") as f:
         bundle = pickle.load(f)
-    sub = bundle["mode"]                                    # fester Ordner pro Modus -> wird überschrieben
+    sub = bundle["mode"]                                    # fixed folder per mode -> overwritten on every run
     m = re.match(r"^batch_(.+)_\d{8}_\d{6}$", str(bundle.get("name", "")))
     if sub == "batch" and m:
-        sub = f"batch_{m.group(1)}"                          # Batch: wire und catphan getrennt
+        sub = f"batch_{m.group(1)}"                          # batch: wire and catphan in separate folders
     _OUT_DIR = os.path.join(PLOTS_DIR, sub)
-    print(f"\nPlotte {len(bundle['plots'])} Einträge aus {os.path.basename(path)} -> {_OUT_DIR}")
-    print("  Enthaltene Plots:", ", ".join(i["kind"] for i in bundle["plots"]))
+    print(f"\nPlotting {len(bundle['plots'])} entries from {os.path.basename(path)} -> {_OUT_DIR}")
+    print("  Contained plots:", ", ".join(i["kind"] for i in bundle["plots"]))
     for item in bundle["plots"]:
         try:
             PLOT_FUNCS[item["kind"]](**item["data"])
         except Exception as ex:
-            print(f"  FEHLER bei Plot '{item['kind']}': {ex}")
+            print(f"  ERROR in plot '{item['kind']}': {ex}")
             traceback.print_exc()
     try:
         build_multifigures(bundle)
     except Exception as ex:
-        print(f"  FEHLER bei Multi-Figure: {ex}")
+        print(f"  ERROR in multi-panel figure: {ex}")
         traceback.print_exc()
     plt.close("all")
 
 
 def _pkls_for_mode(mode):
-    """Neueste .pkl des Modus (Batch: neueste je Variante, z. B. wire und catphan)."""
+    """Newest .pkl in RESULTS_DIR for a mode (batch: newest per variant, e.g. wire and catphan)."""
     files = sorted(glob.glob(os.path.join(RESULTS_DIR, f"{mode}_*.pkl")), key=os.path.getmtime, reverse=True)
     if mode != "batch":
         return files[:1]
@@ -979,25 +1063,27 @@ def _pkls_for_mode(mode):
 
 
 def plot_mode(choice):
+    """Render the newest .pkl of the chosen menu mode ("1"-"5"), or of every mode for "6"."""
     modes = list(MODES.values()) if choice == "6" else [MODES[choice]]
     for mode in modes:
         files = _pkls_for_mode(mode)
         if not files:
-            print(f"\nModus '{mode}': keine .pkl in {RESULTS_DIR} -> zuerst tp_compute.py ausführen.")
+            print(f"\nMode '{mode}': no .pkl in {RESULTS_DIR} -> run tp_compute.py first.")
         for f in files:
             render(f)
 
 
 def main(argv):
+    """Command-line entry point: a .pkl path, a mode number 1-6, or no argument (interactive menu)."""
     if argv and argv[0].lower().endswith(".pkl"):
         render(argv[0]); return
     choice = argv[0] if argv else None
     if choice not in (*MODES, "6"):
-        print("\nWelche Ergebnisse plotten?")
+        print("\nWhich results should be plotted?")
         for k, v in MODE_TEXT.items():
             print(f"  {k} = {v}")
-        print("  6 = Alles (neueste Ergebnisse jedes Modus)")
-        choice = input("Auswahl [1-6] (Standard: 6): ").strip() or "6"
+        print("  6 = All (newest results of every mode)")
+        choice = input("Choice [1-6] (default: 6): ").strip() or "6"
         if choice not in (*MODES, "6"):
             choice = "6"
     plot_mode(choice)
