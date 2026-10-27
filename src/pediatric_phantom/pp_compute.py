@@ -60,6 +60,7 @@ def _ask_organ_pairs():
 def _process_dataset(dicom_path, label, organ_pairs, device, do_postprocess=True):
     """Ein Datensatz: DICOM -> TotalSegmentator -> Vollvolumen-CNR/SNR (gecacht)."""
     import traceback
+    import nibabel as nib
     sig = CacheManager.dataset_signature(dicom_path)
     ctdi = DicomUtils.read_ctdivol(dicom_path)
     kernel, mfr, kvp = DicomUtils.read_ct_parameters(dicom_path)
@@ -81,6 +82,13 @@ def _process_dataset(dicom_path, label, organ_pairs, device, do_postprocess=True
         print(f"  TotalSegmentator fehlgeschlagen: {exc}"); traceback.print_exc(); return None
 
     ct_arr, seg_arr = seg["ct_array"], seg["seg_array"]
+    # Voxelvolumen (ml) aus der Segmentierungs-NIfTI – für VOI-Volumen nach Erosion
+    try:
+        vox_ml = float(np.prod(nib.load(str(seg["seg_path"])).header.get_zooms()[:3])) / 1000.0
+    except Exception as exc:
+        print(f"  [Warnung] Voxelvolumen nicht lesbar: {exc}")
+        vox_ml = float("nan")
+
     cache_entry = CacheManager.read().get(sig, {})
     reuse = (cache_entry.get("computation_mode") == "volumetric"
              and cache_entry.get("segmentation_path") == str(seg["seg_path"])
@@ -106,8 +114,8 @@ def _process_dataset(dicom_path, label, organ_pairs, device, do_postprocess=True
             "ctdivol": ctdi, "kernel": kernel, "manufacturer": mfr, "kvp": kvp,
             "slice_thickness_mm": sl_mm, "reference_slice_thickness_mm": sl_mm,
             "segmentation_path": str(seg["seg_path"]), "cnr_results": cnr_results,
-            "computation_mode": "volumetric", "study_description": study_desc}
-
+            "computation_mode": "volumetric", "study_description": study_desc,
+            "voxel_volume_ml": vox_ml}
 
 def _process_root(root, organ_pairs, device, do_postprocess=True):
     """Alle DICOM-Unterordner eines Wurzelpfades verarbeiten -> dataset_results."""
@@ -132,6 +140,88 @@ def _results_to_csv(results, name):
     out = paths.CSV_DIR / f"cnr_results_{name}_{datetime.now():%Y%m%d_%H%M%S}.csv"
     CsvExporter.export_csv(results, output_path=out)
     return out
+
+HU_ORGANS = {"liver": "Liver", "autochthonous_muscle": "Autochthonous muscle",
+             "iliopsoas": "Psoas muscle", "psoas": "Psoas muscle"}
+
+
+def _organ_hu_to_csv(results, name):
+    """Mittlere HU, SD und VOI-Volumen (vor/nach Erosion) je Scanner, kV und Dosisstufe."""
+    import csv
+    per_ds = []
+    for ds in results:
+        seen = {}
+        for r in ds.get("cnr_results", []):
+            for side in ("signal", "background"):
+                org = HU_ORGANS.get(r.get(f"{side}_organ"))
+                if org and org not in seen:
+                    seen[org] = {
+                        "mean_hu":    r[f"{side}_mean_hu"],
+                        "sd_hu":      r[f"{side}_std_hu"],
+                        "voxels_raw": r.get(f"{side}_voxel_count_raw", r[f"{side}_voxel_count"]),
+                        "voxels_ero": r[f"{side}_voxel_count"],
+                    }
+        vox_ml = ds.get("voxel_volume_ml", float("nan"))
+        for org, v in seen.items():
+            vol_raw = v["voxels_raw"] * vox_ml
+            vol_ero = v["voxels_ero"] * vox_ml
+            pct = (100.0 * v["voxels_ero"] / v["voxels_raw"]
+                   if v["voxels_raw"] > 0 else float("nan"))
+            per_ds.append({
+                "scanner": ds.get("manufacturer", ""),
+                "kvp_kV": ds.get("kvp", ""),
+                "ctdivol_mGy": PlotReader.to_float(ds.get("ctdivol")),
+                "kernel": ds.get("kernel", ""),
+                "organ": org,
+                "dataset": ds.get("label", ""),
+                "mean_hu": v["mean_hu"],
+                "sd_hu": v["sd_hu"],
+                "voi_voxels_raw": v["voxels_raw"],
+                "voi_volume_ml_raw": round(vol_raw, 2),
+                "voi_voxels_eroded": v["voxels_ero"],
+                "voi_volume_ml_eroded": round(vol_ero, 2),
+                "voi_retained_pct": round(pct, 1),
+            })
+    if not per_ds:
+        print("  Keine Organ-HU-Werte gefunden."); return
+
+    ctdi_map = PlotBuilder.cluster_ctdi_values(
+        [r["ctdivol_mGy"] for r in per_ds if r["ctdivol_mGy"] is not None], Config.CTDI_TOLERANCE)
+    groups = {}
+    for r in per_ds:
+        lvl = ctdi_map.get(r["ctdivol_mGy"])
+        r["dose_level_mGy"] = round(lvl, 2) if lvl is not None else ""
+        groups.setdefault((r["scanner"], r["kvp_kV"], r["dose_level_mGy"], r["organ"]), []).append(r)
+
+    summary = []
+    for (sc, kv, dose, org), rs in sorted(groups.items(), key=lambda x: tuple(map(str, x[0]))):
+        m = np.array([x["mean_hu"] for x in rs], float)
+        summary.append({
+            "scanner": sc, "kvp_kV": kv, "dose_level_ctdivol_mGy": dose, "organ": org,
+            "n_datasets": len(rs),
+            "mean_hu": round(float(np.nanmean(m)), 2),
+            "sd_hu_within_voi": round(float(np.nanmean([x["sd_hu"] for x in rs])), 2),
+            "sd_of_mean_hu_between_datasets":
+                round(float(np.nanstd(m, ddof=1)), 2) if len(rs) > 1 else "",
+            "voi_volume_ml_raw":
+                round(float(np.nanmean([x["voi_volume_ml_raw"] for x in rs])), 2),
+            "voi_volume_ml_eroded":
+                round(float(np.nanmean([x["voi_volume_ml_eroded"] for x in rs])), 2),
+            "voi_retained_pct":
+                round(float(np.nanmean([x["voi_retained_pct"] for x in rs])), 1),
+            "voi_voxels_raw": int(np.mean([x["voi_voxels_raw"] for x in rs])),
+            "voi_voxels_eroded": int(np.mean([x["voi_voxels_eroded"] for x in rs])),
+        })
+
+    paths.CSV_DIR.mkdir(parents=True, exist_ok=True)
+    ts = f"{datetime.now():%Y%m%d_%H%M%S}"
+    for rows, fn in ((summary, f"organ_HU_SD_VOIvolume_by_scanner_kV_dose_{name}_{ts}.csv"),
+                     (per_ds,  f"organ_HU_SD_VOIvolume_per_dataset_{name}_{ts}.csv")):
+        out = paths.CSV_DIR / fn
+        with open(out, "w", newline="", encoding="utf-8") as fh:
+            w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+            w.writeheader(); w.writerows(rows)
+        print(f"  Organ-HU-CSV gespeichert: {out}")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -180,12 +270,12 @@ def run_scanner(organ_pairs, device):
     if len(results) < 2:
         print("  Zu wenige Datensätze."); return
     csv_path = _results_to_csv(results, sub)
+    _organ_hu_to_csv(results, sub)
     rows = PlotReader.filter_rows(PlotReader.read_csv(str(csv_path)))
     cnr_plots, fom_plots = _scanner_plots(rows)
     all_plots = cnr_plots + fom_plots
     _save_pkl(sub, {"task": sub, "plots": all_plots})
     pp_plots.render_task(sub, all_plots)
-
 
 def run_reproducibility(organ_pairs, device):
     print("\n=== Reproduzierbarkeit ===")
