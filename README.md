@@ -36,9 +36,17 @@ Your own data paths are **not** part of the repository. Each package contains a 
 | `src/pediatric_phantom/pp_paths_example.py` | `src/pediatric_phantom/pp_paths.py` | `pp_compute.py`, `pp_plots.py` |
 | `src/technical_phantom/tp_datasets_example.py` | `src/technical_phantom/tp_datasets.py` | `tp_compute.py` |
 
+`pp_paths.py` / `tp_datasets.py` are **not** included in the repository. Create them from the
+templates; they stay local and are ignored by git. Without them the scripts stop with an error.
+
 ```bash
+# Windows
 copy src\pediatric_phantom\pp_paths_example.py src\pediatric_phantom\pp_paths.py
 copy src\technical_phantom\tp_datasets_example.py src\technical_phantom\tp_datasets.py
+
+# Linux / macOS
+cp src/pediatric_phantom/pp_paths_example.py src/pediatric_phantom/pp_paths.py
+cp src/technical_phantom/tp_datasets_example.py src/technical_phantom/tp_datasets.py
 ```
 
 Then open the two copies and replace every placeholder path. The templates explain for every variable which

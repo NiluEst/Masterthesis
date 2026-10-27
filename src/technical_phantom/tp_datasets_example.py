@@ -3,7 +3,8 @@ Technical phantom – dataset paths and dataset lists (EXAMPLE / TEMPLATE)
 =======================================================================
 This file is a template. To run the technical-phantom analysis:
 
-    1. Rename this file to ``tp_datasets.py`` (leave it in the same folder)
+    1. Copy this file to ``tp_datasets.py`` (same folder). pp_paths.py is git-ignored,
+       so your local paths are never committed.
     2. Replace every placeholder path with the folder of YOUR series.
     3. Run ``python tp_compute.py`` from this folder.
 

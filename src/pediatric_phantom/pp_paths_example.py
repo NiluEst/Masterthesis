@@ -3,7 +3,8 @@ Paediatric phantom – data paths (EXAMPLE / TEMPLATE)
 ====================================================
 This file is a template. To run the paediatric-phantom analysis:
 
-    1. Change the name to ``pp_paths.py`` (keep it in the same folder)
+    1. Copy this file to ``pp_paths.py`` (same folder). pp_paths.py is git-ignored,
+       so your local paths are never committed.
     2. Replace every placeholder path below with the folder that holds YOUR data.
     3. Run ``python pp_compute.py`` from this folder.
 
