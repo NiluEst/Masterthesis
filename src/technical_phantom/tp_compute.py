@@ -556,11 +556,10 @@ class QAPipeline:
 
                     contrast = abs(material_means[name] - mean_bg)
 
-                    # NOTE (open question, to be clarified with the supervisor):
-                    # the measured insert contrast C is passed as `contrast_hu`, so the returned value is
-                    # d' itself (dimensionless; d' = C * d'/C). It is NOT d'/C in 1/HU – that would require
-                    # contrast_hu=1.0 (see compute_detectability_index_ttf). Plots and CSV therefore show d'.
-
+                    # The measured insert contrast C is passed as `contrast_hu`, so the returned value is
+                    # the dimensionless d' = C * (d'/C). This deliberately includes contrast differences
+                    # between PCCT and EICT. For d'/C in 1/HU (Monnin et al., Table 5) use contrast_hu=1.0.
+                    
                     dp = self.analysis.compute_detectability_index_ttf(
                         ttf_res["fr_lp_mm"], ttf_res["ttf"], freqs, nps_1d,
                         dprime_diameter_mm, contrast_hu=contrast)
