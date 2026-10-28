@@ -228,7 +228,8 @@ src/technical_phantom/tp_datasets.py
 check.py
 src/pediatric_phantom/test.py
 # Local data overviews and old caches (contain internal server paths)
-DICOM_Uebersicht*.xlsx
+DICOM_*.xlsx
+~$*
 src/Results/
 src/pediatric_phantom/roi_selection_cache.json
 
