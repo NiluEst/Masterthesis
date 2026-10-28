@@ -194,6 +194,15 @@ Masterthesis/
 
 The phantom DICOM data are not publicly available. They can be provided by the author upon reasonable request.
 
+## How to cite
+
+If you use this code, please cite it (see `CITATION.cff` or the
+"Cite this repository" button on GitHub).
+
+## License
+
+This project is licensed under the MIT License – see [LICENSE](LICENSE).
+
 ## 7. References
 
 * Wasserthal J. et al. *TotalSegmentator: robust segmentation of 104 anatomic structures in CT images.* Radiol Artif Intell 2023.

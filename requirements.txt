@@ -9,5 +9,5 @@ scikit-image
 SimpleITK
 nibabel
 torch                  # used by TotalSegmentator (GPU optional, CPU works but is slow)
-TotalSegmentator       # organ segmentation of the paediatric phantom
+TotalSegmentator==2.18.0   # organ segmentation of the paediatric phantom
 tqdm                   # progress bar in organize_dicom_files.py
