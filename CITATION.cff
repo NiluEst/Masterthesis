@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "Phantom-Based Protocol Optimization and Comparison of Photon-Counting CT and Energy-Integrating CT in Pediatric Abdominal Imaging"
+authors:
+  - family-names: Estiry
+    given-names: Nilufar
+version: 1.0.0
+date-released: 2026-10-28
+license: MIT
+repository-code: "https://github.com/NiluEst/Masterthesis"

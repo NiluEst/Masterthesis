@@ -190,6 +190,10 @@ Masterthesis/
         └── tp_datasets_example.py   template for tp_datasets.py (your dataset paths and lists)
 ```
 
+## Data availability
+
+The phantom DICOM data are not publicly available. They can be provided by the author upon reasonable request.
+
 ## 7. References
 
 * Wasserthal J. et al. *TotalSegmentator: robust segmentation of 104 anatomic structures in CT images.* Radiol Artif Intell 2023.
