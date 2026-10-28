@@ -485,12 +485,38 @@ class CacheManager:
             json.dump(cache, f, indent=2)
 
     def signature(self, folder):
+        """Path-independent key: SeriesInstanceUID + file count.
+        Legacy path-based keys are migrated automatically."""
         abs_folder = os.path.abspath(folder)
         names = sorted(f for f in os.listdir(abs_folder)
-                       if os.path.isfile(os.path.join(abs_folder, f)))
+                    if os.path.isfile(os.path.join(abs_folder, f)))
         if not names:
             return abs_folder
-        return f"{abs_folder}|n={len(names)}|first={names[0]}|last={names[-1]}"
+        uid = None
+        for f in names:
+            try:
+                uid = pydicom.dcmread(os.path.join(abs_folder, f), stop_before_pixels=True,
+                                    specific_tags=["SeriesInstanceUID"]).SeriesInstanceUID
+                break
+            except Exception:
+                continue
+        if uid is None:  # fallback: old scheme
+            return f"{abs_folder}|n={len(names)}|first={names[0]}|last={names[-1]}"
+        sig = f"uid={uid}|n={len(names)}"
+        self._migrate_legacy(sig, os.path.basename(abs_folder), len(names), names[0], names[-1])
+        return sig
+
+    def _migrate_legacy(self, sig, base, n, first, last):
+        cache = self._read()
+        if sig in cache:
+            return
+        tail = f"|n={n}|first={first}|last={last}"
+        for k in list(cache):
+            if k.endswith(tail) and os.path.basename(k[:-len(tail)]) == base:
+                cache[sig] = cache.pop(k)
+                self._write(cache)
+                print(f"  Cache migrated: {os.path.basename(k[:-len(tail)])} → {sig}")
+                return
 
     def get(self, sig):
         return self._read().get(sig) or {}
